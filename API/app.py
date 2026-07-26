@@ -661,16 +661,17 @@ def analizar_calidad_y_senales_rinex(obs_b, obs_r, max_gap_tolerado=0.05):
                     if obs_type in ['C1', 'L1', 'C5', 'L5']:
                         base_bands.add(obs_type)
     
-    # Lógica estricta matemática de conjuntos
-    is_mod_a = (base_bands == {'C1'} and rover_bands == {'C1'})
+    # REGLA A: Rover estrictamente C1, la Base contiene C1 (ignora si trae extras)
+    is_mod_a = ('C1' in base_bands and rover_bands == {'C1'})
+    
+    # REGLA C: Base y Rover deben procesar fase L1 y L5
     is_mod_c = ('L1' in base_bands and 'L5' in base_bands and 'L1' in rover_bands and 'L5' in rover_bands)
     
-    # Ratio base de sincronía referencial (no vinculante para enrutar)
     sync_epochs = sum(1 for tr in tows_r if any(abs(tb - tr) <= max_gap_tolerado for tb in tows_b))
     ratio_sync = sync_epochs / max(1, len(tows_r))
     
     if is_mod_a:
-        return "MODO_A_CODIGO", ratio_sync, f"Regla A estricta: Base solo C1 y Rover solo C1. Enrutando a Módulo A."
+        return "MODO_A_CODIGO", ratio_sync, f"Regla A estricta: Rover C1 puro. Enrutando a Módulo A."
     elif is_mod_c:
         return "MODO_C_PPK", ratio_sync, f"Regla C estricta: Base L1+L5 y Rover L1+L5. Enrutando a Módulo C."
     else:
@@ -1110,7 +1111,7 @@ def procesar_ekF_PPK_L1_L5(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_ma
         return None, f"FAILED_EXCEPTION:_{str(e)}", kf_estado, None
 
 # =====================================================================
-# VÍA 2 -> MÓDULO B: MOTOR IRLS CLÁSICO (ACTUALIZADO MAREAS + SP3)
+# VÍA 2 -> MÓDULO B: MOTOR IRLS CLÁSICO
 # =====================================================================
 def calcular_IRLS_MODO_B(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle):
     try:
@@ -1571,17 +1572,17 @@ def tab3_calibrar():
                 
             if not sd_suavizada: yield "[CAJA_ERROR] No hay épocas sincronizadas válidas.\n"; return
             
-            # --- OPTIMIZACIÓN 30% DEL ARREGLO DE ÉPOCAS ---
+            # --- OPTIMIZACIÓN 30% DE LA MUESTRA ---
             t_sample_full = list(sd_suavizada.keys())
             total_ep = len(t_sample_full)
-            limit_30 = max(1, int(total_ep * 0.30))
+            limit_30 = max(1, int(total_ep * 0.30)) 
             step_30 = total_ep // limit_30 if limit_30 > 0 else 1
             t_sample = t_sample_full[::step_30][:limit_30]
             
             y_m, m_m, d_m = sd_suavizada[t_sample_full[0]]['_meta'][:3]
             fecha_med = f"{y_m}-{m_m:02d}-{d_m:02d}"
             
-            yield f"[PROGRESO] Fase 1: Extracción de Límites (Pre-Scan de Muestra Optimizada al 30%: {len(t_sample)} épocas)...\n"
+            yield f"[PROGRESO] Fase 1: Extracción de Límites (Pre-Scan Optimizado al 30%: {len(t_sample)} épocas)...\n"
             
             coords_raw = []
             if modo_str in ["MODO_A_CODIGO", "MODO_C_PPK"]:
@@ -1616,7 +1617,10 @@ def tab3_calibrar():
             snr_center, snr_span, gap_center, gap_span = p_snr, 5.0, p_max_gap, 0.02
             
             for nivel in range(p_iter):
-                yield f"[PROGRESO] Procesando calibración... Refinando espacio de búsqueda (Zoom {nivel+1}/{p_iter})...\n"
+                # INYECCIÓN DE HEARTBEAT DE PROGRESO Y TEXTO DE UI
+                pct_base = int((nivel / p_iter) * 100)
+                yield f"[PROGRESO] CALIBRANDO... Nivel de profundidad {nivel+1}/{p_iter} ({pct_base}%)\n"
+                
                 m_grid = [max(1.0, min(25.0, x)) for x in [m_center - m_span, m_center, m_center + m_span]]
                 cp_grid = [max(0.1, min(5.0, x)) for x in [cp_center - cp_span, cp_center, cp_center + cp_span]]
                 ca_grid = [max(0.1, min(5.0, x)) for x in [ca_center - ca_span, ca_center, ca_center + ca_span]]
@@ -1682,6 +1686,7 @@ def tab3_calibrar():
                     m_span /= 2.0; cp_span /= 2.0; ca_span /= 2.0; snr_span /= 2.0
             
             if best_rmse != float('inf'):
+                yield f"[PROGRESO] CALIBRANDO... Etapa Finalizada (100%)\n"
                 for k, v in [('opt_mask', best_params['mask']), ('opt_cp', best_params['cp']), ('opt_ca', best_params['ca']), ('opt_max_gap', best_params.get('max_gap', p_max_gap)), ('opt_snr', best_params.get('snr', p_snr)), ('opt_eh', best_params['eh']), ('opt_ev', best_params['ev']), ('opt_bias_n', best_params['dn']), ('opt_bias_e', best_params['de']), ('opt_bias_z', best_params['dz']), ('estrategia_activa', modo_str)]: guardar_estado(k, v)
                 
                 fecha_calculo = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
