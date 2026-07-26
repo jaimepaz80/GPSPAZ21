@@ -9,7 +9,6 @@ import json
 import threading
 import re
 import functools
-import time
 from flask import Flask, request, send_file, Response
 import tempfile
 
@@ -103,7 +102,7 @@ def descargar_desde_gdrive(url, filepath):
     return True
 
 # =====================================================================
-# ÁLGEBRA LINEAL DE ESTADO SÓLIDO
+# ÁLGEBRA LINEAL DE ESTADO SÓLIDO (INDEPENDIENTE DE MÓDULOS)
 # =====================================================================
 def transpose_matrix(M):
     if not M or not M[0]: return []
@@ -636,49 +635,80 @@ def calcular_posicion_satelite_wgs84(eph, t_emision, tau_vuelo, sys_char='G'):
     return (xs * math.cos(theta) + ys * math.sin(theta), -xs * math.sin(theta) + ys * math.cos(theta), zs, dt_sat)
 
 # =====================================================================
-# ENRUTADOR AUTOMÁTICO BINARIO ESTRICTO (DETERMINISTA Y EXCLUYENTE)
+# ENRUTADOR AUTOMÁTICO (REGLAS EXCLUYENTES V19)
 # =====================================================================
 def analizar_calidad_y_senales_rinex(obs_b, obs_r, max_gap_tolerado=0.05):
     tows_b = sorted(list(obs_b.keys()))
     tows_r = sorted(list(obs_r.keys()))
     
-    if not tows_b or not tows_r: return "MODO_C_SPP", 0.0, "Cero épocas. Archivo vacío o corrupto."
+    if not tows_b or not tows_r: 
+        return "MODO_C_SPP", 0.0, "Cero épocas. Archivo vacío o corrupto."
     
-    base_bands = set()
-    rover_bands = set()
+    t_ini_b, t_fin_b = tows_b[0], tows_b[-1]
+    t_ini_r, t_fin_r = tows_r[0], tows_r[-1]
+    
+    overlap_ini = max(t_ini_b, t_ini_r)
+    overlap_fin = min(t_fin_b, t_fin_r)
+    
+    if overlap_ini > overlap_fin:
+        return "MODO_C_SPP", 0.0, "Cero solapamiento temporal entre Base y Rover. Requiere cálculo autónomo."
+        
+    sync_epochs = 0
+    total_eval = 0
+    
+    base_L1_count = 0
+    base_L5_count = 0
+    rover_L1_count = 0
+    rover_L5_count = 0
     
     for tr in tows_r:
-        for s in obs_r[tr]:
-            if s != '_meta':
-                for obs_type in obs_r[tr][s]:
-                    if obs_type in ['C1', 'L1', 'C5', 'L5']:
-                        rover_bands.add(obs_type)
+        if tr < overlap_ini or tr > overlap_fin: continue
+        total_eval += 1
+        idx = min(range(len(tows_b)), key=lambda i: abs(tows_b[i] - tr))
+        gap = abs(tows_b[idx] - tr)
+        
+        if gap <= max_gap_tolerado:
+            sync_epochs += 1
+            
+        d_r = obs_r[tr]
+        d_b = obs_b[tows_b[idx]]
+        
+        for s in d_r:
+            if s == '_meta' or s not in d_b: continue
+            
+            if 'L1' in d_b[s] and d_b[s]['L1'] != 0.0: base_L1_count += 1
+            if 'L5' in d_b[s] and d_b[s]['L5'] != 0.0: base_L5_count += 1
+            
+            if 'L1' in d_r[s] and d_r[s]['L1'] != 0.0: rover_L1_count += 1
+            if 'L5' in d_r[s] and d_r[s]['L5'] != 0.0: rover_L5_count += 1
+                
+    if total_eval == 0: 
+        return "MODO_C_SPP", 0.0, "Sin épocas en la ventana de solapamiento."
+    
+    ratio_sync = sync_epochs / total_eval
+    
+    tiene_doble_fase = (base_L1_count > 0 and base_L5_count > 0 and 
+                        rover_L1_count > 0 and rover_L5_count > 0)
                         
-    for tb in tows_b:
-        for s in obs_b[tb]:
-            if s != '_meta':
-                for obs_type in obs_b[tb][s]:
-                    if obs_type in ['C1', 'L1', 'C5', 'L5']:
-                        base_bands.add(obs_type)
-    
-    # REGLA A: Rover estrictamente C1, la Base contiene C1 (ignora si trae extras)
-    is_mod_a = ('C1' in base_bands and rover_bands == {'C1'})
-    
-    # REGLA C: Base y Rover deben procesar fase L1 y L5
-    is_mod_c = ('L1' in base_bands and 'L5' in base_bands and 'L1' in rover_bands and 'L5' in rover_bands)
-    
-    sync_epochs = sum(1 for tr in tows_r if any(abs(tb - tr) <= max_gap_tolerado for tb in tows_b))
-    ratio_sync = sync_epochs / max(1, len(tows_r))
-    
-    if is_mod_a:
-        return "MODO_A_CODIGO", ratio_sync, f"Regla A estricta: Rover C1 puro. Enrutando a Módulo A."
-    elif is_mod_c:
-        return "MODO_C_PPK", ratio_sync, f"Regla C estricta: Base L1+L5 y Rover L1+L5. Enrutando a Módulo C."
+    tiene_fase_mono = (base_L1_count > 0 and rover_L1_count > 0 and 
+                       (base_L5_count == 0 or rover_L5_count == 0))
+                       
+    no_tiene_fase = (base_L1_count == 0 or rover_L1_count == 0)
+
+    if tiene_doble_fase:
+        return "MODO_C_PPK", ratio_sync, "Fase Dual detectada en Base y Rover (L1+L5). Enrutando a MÓDULO C (PPK Dual)."
+    elif tiene_fase_mono:
+        return "MODO_B_FASE", ratio_sync, "Fase Monofrecuencia (L1) detectada. Enrutando a MÓDULO B (Blindaje IRLS para evitar divergencia EKF)."
+    elif no_tiene_fase:
+        if ratio_sync > 0.5:
+            return "MODO_A_CODIGO", ratio_sync, "Código Puro homogéneo (>50% sinc). Enrutando a MÓDULO A (EKF de Código)."
+        else:
+            return "MODO_B_ASINCRONO", ratio_sync, "Código Puro con asincronía severa (<50% sinc). Enrutando a MÓDULO B (IRLS Asíncrono)."
     else:
-        return "MODO_B_ASINCRONO", ratio_sync, f"Regla B Excluyente: Base {list(base_bands)} | Rover {list(rover_bands)}. Enrutando a Módulo B."
+        return "MODO_B_ASINCRONO", ratio_sync, "Fallo en clasificación lógica. Enrutando a Módulo de rescate B."
 
 # =====================================================================
-# AISLAMIENTO DE OBSERVABLES - MÓDULOS TOTALMENTE INDEPENDIENTES
+# AISLAMIENTO DE OBSERVABLES (MÓDULOS A, B Y C)
 # =====================================================================
 def aislar_diferencias_simples_ppk(obs_b, obs_r):
     sd_suavizada = {}
@@ -766,26 +796,43 @@ def aislar_diferencias_MODO_C(obs_b, obs_r):
             if s == '_meta' or s not in obs_b[tow]: continue
             d_b = obs_b[tow][s]
             
-            c1_r, l1_r, c5_r, l5_r = d_r.get('C1'), d_r.get('L1'), d_r.get('C5'), d_r.get('L5')
-            c1_b, l1_b, c5_b, l5_b = d_b.get('C1'), d_b.get('L1'), d_b.get('C5'), d_b.get('L5')
+            c1_r = d_r.get('C1')
+            l1_r = d_r.get('L1')
+            c5_r = d_r.get('C5')
+            l5_r = d_r.get('L5')
+            
+            c1_b = d_b.get('C1')
+            l1_b = d_b.get('L1')
+            c5_b = d_b.get('C5')
+            l5_b = d_b.get('L5')
             
             if c1_r is not None and c1_b is not None and c5_r is not None and c5_b is not None:
                 sd_epoca[s] = {
-                    'C1': {'sd_P': c1_r - c1_b, 'pr_b': c1_b, 'pr_r': c1_r, 'cp_b': l1_b, 'cp_r': l1_r, 'wave': WAVE_L1, 'snr': min(d_b.get('S1', 30.0), d_r.get('S1', 30.0))},
-                    'C5': {'sd_P': c5_r - c5_b, 'pr_b': c5_b, 'pr_r': c5_r, 'cp_b': l5_b, 'cp_r': l5_r, 'wave': WAVE_L5, 'snr': min(d_b.get('S5', 30.0), d_r.get('S5', 30.0))},
+                    'C1': {
+                        'sd_P': c1_r - c1_b, 'pr_b': c1_b, 'pr_r': c1_r, 
+                        'cp_b': l1_b, 'cp_r': l1_r, 'wave': WAVE_L1, 
+                        'snr': min(d_b.get('S1', 30.0), d_r.get('S1', 30.0))
+                    },
+                    'C5': {
+                        'sd_P': c5_r - c5_b, 'pr_b': c5_b, 'pr_r': c5_r, 
+                        'cp_b': l5_b, 'cp_r': l5_r, 'wave': WAVE_L5, 
+                        'snr': min(d_b.get('S5', 30.0), d_r.get('S5', 30.0))
+                    },
                     'sys': s[0]
                 }
         if len(sd_epoca) > 2: sd_suavizada[tow] = sd_epoca
     return sd_suavizada
 
 # =====================================================================
-# MOTORES INDIVIDUALES: MÓDULO A (EKF CÓDIGO) Y MÓDULO C (PPK DUAL)
+# VÍA 1 -> MÓDULO A: MOTOR EKF + LAMBDA + RTS
 # =====================================================================
 def decorrelacion_lambda_z(Q):
     n = len(Q)
     Z = matid(n)
-    try: L = cholesky_decompose(Q)
-    except: return Z, Q 
+    try:
+        L = cholesky_decompose(Q)
+    except:
+        return Z, Q 
     for i in range(n - 1, -1, -1):
         for j in range(i - 1, -1, -1):
             mu = round(L[i][j] / L[j][j])
@@ -799,57 +846,93 @@ def decorrelacion_lambda_z(Q):
 def suavizador_rts_backward(forward_states):
     n = len(forward_states)
     if n == 0: return []
+    
     smoothed_states = [None] * n
     smoothed_states[-1] = forward_states[-1]['X_post']
+    
     for k in range(n-2, -1, -1):
-        P_post_k, P_pri_k1 = forward_states[k]['P_post'], forward_states[k+1]['P_pri']
+        P_post_k = forward_states[k]['P_post']
+        P_pri_k1 = forward_states[k+1]['P_pri']
+        
         P_pri_inv = invert_matrix_nxn(P_pri_k1)
         if not P_pri_inv:
             smoothed_states[k] = forward_states[k]['X_post']
             continue
+            
         C_k = matmul(P_post_k, P_pri_inv)
-        X_smooth_k1, X_pri_k1 = smoothed_states[k+1], forward_states[k+1]['X_pri']
+        
+        X_smooth_k1 = smoothed_states[k+1]
+        X_pri_k1 = forward_states[k+1]['X_pri']
+        
         dx = [[X_smooth_k1[i][0] - X_pri_k1[i][0]] for i in range(3)]
         correction = matmul(C_k, dx)
+        
         X_post_k = forward_states[k]['X_post']
         smoothed_states[k] = [[X_post_k[i][0] + correction[i][0]] for i in range(3)]
+        
     return smoothed_states
 
 def procesar_ekF_lambda(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_mask):
     try:
         tow_b = sd_epoca.get('_tow_b', tr)
+        
         X_pri = [[kf_estado['X'][0][0]], [kf_estado['X'][1][0]], [kf_estado['X'][2][0]]]
         P_pri = [row[:] for row in kf_estado['P']]
         h_r = kf_estado.get('h_r', 0.0)
         
         if 'prev_cp' not in kf_estado: kf_estado['prev_cp'] = {}
         
-        X_iter, Y_iter, Z_iter = X_pri[0][0], X_pri[1][0], X_pri[2][0]
+        X_iter = X_pri[0][0]
+        Y_iter = X_pri[1][0]
+        Z_iter = X_pri[2][0]
+        
         lat_r, lon_r, alt_r = ecef_a_geodesicas(X_iter, Y_iter, Z_iter)
         lat_rad, lon_rad = math.radians(lat_r), math.radians(lon_r)
         
-        X_apc, Y_apc, Z_apc = X_iter + h_r * math.cos(lat_rad) * math.cos(lon_rad), Y_iter + h_r * math.cos(lat_rad) * math.sin(lon_rad), Z_iter + h_r * math.sin(lat_rad)
-        alpha, beta = nav.get('_iono', {}).get('alpha', [0]*4), nav.get('_iono', {}).get('beta', [0]*4)
+        X_apc = X_iter + h_r * math.cos(lat_rad) * math.cos(lon_rad)
+        Y_apc = Y_iter + h_r * math.cos(lat_rad) * math.sin(lon_rad)
+        Z_apc = Z_iter + h_r * math.sin(lat_rad)
+        
+        alpha = nav.get('_iono', {}).get('alpha', [0]*4)
+        beta = nav.get('_iono', {}).get('beta', [0]*4)
         
         y_m, m_m, d_m, h_m, mn_m, sec_m = sd_epoca['_meta']
-        dx_tide, dy_tide, dz_tide = correccion_mareas_solidas(kf_estado['X_base'][0], kf_estado['X_base'][1], kf_estado['X_base'][2], tow_b, y_m, m_m, d_m)
-        X_base_corr, Y_base_corr, Z_base_corr = kf_estado['X_base'][0] + dx_tide, kf_estado['X_base'][1] + dy_tide, kf_estado['X_base'][2] + dz_tide
+        
+        dx_tide, dy_tide, dz_tide = correccion_mareas_solidas(
+            kf_estado['X_base'][0], kf_estado['X_base'][1], kf_estado['X_base'][2], 
+            tow_b, y_m, m_m, d_m
+        )
+        
+        X_base_corr = kf_estado['X_base'][0] + dx_tide
+        Y_base_corr = kf_estado['X_base'][1] + dy_tide
+        Z_base_corr = kf_estado['X_base'][2] + dz_tide
+        
         lat_base, lon_base, alt_base = ecef_a_geodesicas(X_base_corr, Y_base_corr, Z_base_corr)
         
         sat_positions = {}
         for s, d in sd_epoca.items():
             if s == '_meta' or s == '_tow_b' or d['sd_P'] is None: continue 
-            tau_r, tau_b = d['pr_r'] / C_LIGHT, d['pr_b'] / C_LIGHT
-            t_emision_r, t_emision_b = tr - tau_r, tow_b - tau_b
+            tau_r = d['pr_r'] / C_LIGHT
+            tau_b = d['pr_b'] / C_LIGHT
+            
+            t_emision_r = tr - tau_r
+            t_emision_b = tow_b - tau_b
             
             sp_r, sp_b = None, None
+            
             if sp3 and s in sp3:
-                sp3_res_r, sp3_res_b = interpolate_sp3(sp3, s, t_emision_r), interpolate_sp3(sp3, s, t_emision_b)
+                sp3_res_r = interpolate_sp3(sp3, s, t_emision_r)
+                sp3_res_b = interpolate_sp3(sp3, s, t_emision_b)
                 if sp3_res_r and sp3_res_b:
-                    theta_r, theta_b = OMEGA_E * tau_r, OMEGA_E * tau_b
-                    xs_r, ys_r = sp3_res_r[0] * math.cos(theta_r) + sp3_res_r[1] * math.sin(theta_r), -sp3_res_r[0] * math.sin(theta_r) + sp3_res_r[1] * math.cos(theta_r)
-                    xs_b, ys_b = sp3_res_b[0] * math.cos(theta_b) + sp3_res_b[1] * math.sin(theta_b), -sp3_res_b[0] * math.sin(theta_b) + sp3_res_b[1] * math.cos(theta_b)
-                    sp_r, sp_b = (xs_r, ys_r, sp3_res_r[2], sp3_res_r[3]), (xs_b, ys_b, sp3_res_b[2], sp3_res_b[3])
+                    theta_r = OMEGA_E * tau_r
+                    xs_r = sp3_res_r[0] * math.cos(theta_r) + sp3_res_r[1] * math.sin(theta_r)
+                    ys_r = -sp3_res_r[0] * math.sin(theta_r) + sp3_res_r[1] * math.cos(theta_r)
+                    sp_r = (xs_r, ys_r, sp3_res_r[2], sp3_res_r[3]) 
+                    
+                    theta_b = OMEGA_E * tau_b
+                    xs_b = sp3_res_b[0] * math.cos(theta_b) + sp3_res_b[1] * math.sin(theta_b)
+                    ys_b = -sp3_res_b[0] * math.sin(theta_b) + sp3_res_b[1] * math.cos(theta_b)
+                    sp_b = (xs_b, ys_b, sp3_res_b[2], sp3_res_b[3])
             
             if not sp_r or not sp_b:
                 sp_r = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), t_emision_r), t_emision_r, tau_r, s[0])
@@ -866,6 +949,7 @@ def procesar_ekF_lambda(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_mask)
         constellations = set([s[0] for s in sat_list_full])
         ref_sats = {}
         sat_list = []
+        
         for c in constellations:
             c_sats = [s for s in sat_list_full if s[0] == c]
             if len(c_sats) >= 2:
@@ -889,53 +973,77 @@ def procesar_ekF_lambda(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_mask)
             rho_b, iono_b, dist_b = calc_rho(data['sp_b'], X_base_corr, Y_base_corr, Z_base_corr, lat_base, lon_base, alt_base, el_b, az_b, data['wave'], tow_b)
             base_calcs[s] = {'P': rho_b + iono_b, 'CP': rho_b - iono_b}
 
-        H, L, R_diag = [], [], []
+        H = []; L = []; R_diag = []
+        
         c_ref = {}
         for c, r_sat in ref_sats.items():
             r_data = sat_positions[r_sat]
             el_r, az_r = calcular_topocentricas(r_data['sp_r'][0], r_data['sp_r'][1], r_data['sp_r'][2], X_apc, Y_apc, Z_apc)
             rho_r, iono_r, dist_r = calc_rho(r_data['sp_r'], X_apc, Y_apc, Z_apc, lat_r, lon_r, alt_r + h_r, el_r, az_r, r_data['wave'], tr)
-            c_ref[c] = {'dist_r': dist_r, 'SD_P_calc_ref': (rho_r + iono_r) - base_calcs[r_sat]['P'], 'SD_CP_calc_ref': (rho_r - iono_r) - base_calcs.get(r_sat, {}).get('CP', 0.0), 'sp_r': r_data['sp_r'], 'el_r': el_r, 'snr': r_data['snr'], 'sd_P': r_data['sd_P'], 'cp_r': r_data['cp_r'], 'cp_b': r_data['cp_b']}
+            
+            SD_P_calc_ref = (rho_r + iono_r) - base_calcs[r_sat]['P']
+            SD_CP_calc_ref = (rho_r - iono_r) - base_calcs.get(r_sat, {}).get('CP', 0.0)
+            
+            c_ref[c] = {'dist_r': dist_r, 'SD_P_calc_ref': SD_P_calc_ref, 'SD_CP_calc_ref': SD_CP_calc_ref, 'sp_r': r_data['sp_r'], 'el_r': el_r, 'snr': r_data['snr'], 'sd_P': r_data['sd_P'], 'cp_r': r_data['cp_r'], 'cp_b': r_data['cp_b']}
         
         for s in sat_list:
-            c, data, rc = s[0], sat_positions[s], c_ref[s[0]]
+            c = s[0]
+            data = sat_positions[s]
+            rc = c_ref[c]
+            
             el_i_r, az_i_r = calcular_topocentricas(data['sp_r'][0], data['sp_r'][1], data['sp_r'][2], X_apc, Y_apc, Z_apc)
             rho_i_r, iono_i_r, dist_i_r = calc_rho(data['sp_r'], X_apc, Y_apc, Z_apc, lat_r, lon_r, alt_r + h_r, el_i_r, az_i_r, data['wave'], tr)
             
             SD_P_calc_i = (rho_i_r + iono_i_r) - base_calcs[s]['P']
             DD_P_calc = SD_P_calc_i - rc['SD_P_calc_ref']
             
-            dx_geom = [-(data['sp_r'][0] - X_apc) / dist_i_r - (-(rc['sp_r'][0] - X_apc) / rc['dist_r']), -(data['sp_r'][1] - Y_apc) / dist_i_r - (-(rc['sp_r'][1] - Y_apc) / rc['dist_r']), -(data['sp_r'][2] - Z_apc) / dist_i_r - (-(rc['sp_r'][2] - Z_apc) / rc['dist_r'])]
+            dx_geom = [
+                -(data['sp_r'][0] - X_apc) / dist_i_r - (-(rc['sp_r'][0] - X_apc) / rc['dist_r']),
+                -(data['sp_r'][1] - Y_apc) / dist_i_r - (-(rc['sp_r'][1] - Y_apc) / rc['dist_r']),
+                -(data['sp_r'][2] - Z_apc) / dist_i_r - (-(rc['sp_r'][2] - Z_apc) / rc['dist_r'])
+            ]
+            
             var_base = (10.0 ** (-data['snr'] / 10.0)) * 100.0
             
-            L.append([data['sd_P'] - rc['sd_P'] - DD_P_calc])
-            H.append(dx_geom); R_diag.append(var_base * 9.0)
+            DD_P_obs = data['sd_P'] - rc['sd_P']
+            L.append([DD_P_obs - DD_P_calc])
+            H.append(dx_geom)
+            R_diag.append(var_base * 9.0)
             
             if data['cp_r'] is not None and data['cp_b'] is not None and rc['cp_r'] is not None and rc['cp_b'] is not None:
                 wave = data['wave']
                 SD_CP_calc_i = (rho_i_r - iono_i_r) - base_calcs[s]['CP']
                 DD_CP_calc = SD_CP_calc_i - rc['SD_CP_calc_ref']
+                
                 cp_valid = True
                 if s in kf_estado['prev_cp']:
                     delta_P = data['sd_P'] - kf_estado['prev_cp'][s]['P']
                     delta_CP = (data['cp_r'] - data['cp_b']) - kf_estado['prev_cp'][s]['CP']
-                    if abs(delta_P - delta_CP * wave) > 5.0: cp_valid = False
+                    if abs(delta_P - delta_CP * wave) > 5.0: 
+                        cp_valid = False
+                
                 kf_estado['prev_cp'][s] = {'P': data['sd_P'], 'CP': data['cp_r'] - data['cp_b']}
                 
                 if cp_valid:
                     DD_CP_obs = (data['cp_r'] - data['cp_b']) - (rc['cp_r'] - rc['cp_b'])
                     DD_CP_m = DD_CP_obs * wave
+                    
                     var_amb = [[var_base * 0.0001]]
                     Z_trans, Q_z = decorrelacion_lambda_z(var_amb)
+                    
                     ambiguity_float = (DD_CP_m - DD_CP_calc) / wave
                     amb_z = ambiguity_float * Z_trans[0][0]
-                    amb_restored = round(amb_z) / Z_trans[0][0]
+                    amb_round = round(amb_z)
+                    amb_restored = amb_round / Z_trans[0][0]
+                    
                     if abs(ambiguity_float - amb_restored) < 0.20:
                         L.append([(DD_CP_m - amb_restored * wave) - DD_CP_calc])
-                        H.append(dx_geom); R_diag.append(var_base * 0.0001)
+                        H.append(dx_geom)
+                        R_diag.append(var_base * 0.0001)
                         kf_estado['fix_flags'] += 1
 
         if not H: return None, "FAILED", kf_estado, None
+        
         H_T = transpose_matrix(H)
         R_inv = matid(len(R_diag))
         for i in range(len(R_diag)): R_inv[i][i] = 1.0 / max(1e-6, R_diag[i])
@@ -945,33 +1053,203 @@ def procesar_ekF_lambda(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_mask)
         
         H_T_R_inv = matmul(H_T, R_inv)
         N_mat = matadd(matmul(H_T_R_inv, H), P_inv)
+        U_vec = matmul(H_T_R_inv, L)
+        
         Q_cov = invert_matrix_nxn(N_mat)
         if not Q_cov: return None, "FAILED", kf_estado, None
         
-        Delta_X = matmul(Q_cov, matmul(H_T_R_inv, L))
-        X_post = [[X_pri[0][0] + Delta_X[0][0]], [X_pri[1][0] + Delta_X[1][0]], [X_pri[2][0] + Delta_X[2][0]]]
+        Delta_X = matmul(Q_cov, U_vec)
         
-        kf_estado['X'] = X_post; kf_estado['P'] = Q_cov
+        X_post = [
+            [X_pri[0][0] + Delta_X[0][0]],
+            [X_pri[1][0] + Delta_X[1][0]],
+            [X_pri[2][0] + Delta_X[2][0]]
+        ]
+        
+        kf_estado['X'] = X_post
+        kf_estado['P'] = Q_cov
+        
         status = "FIXED (PPK)" if kf_estado['fix_flags'] > 4 else "FLOAT (DGPS)"
         kf_estado['fix_flags'] = 0 
         
-        state_dict = {'tow': tr, 'X_pri': X_pri, 'P_pri': P_pri, 'X_post': X_post, 'P_post': Q_cov, 'tide': (dx_tide, dy_tide, dz_tide)}
+        state_dict = {
+            'tow': tr, 'X_pri': X_pri, 'P_pri': P_pri, 'X_post': X_post, 'P_post': Q_cov, 'tide': (dx_tide, dy_tide, dz_tide)
+        }
+        
         return (X_post[0][0] - dx_tide, X_post[1][0] - dy_tide, X_post[2][0] - dz_tide), status, kf_estado, state_dict
+
     except Exception as e:
         return None, f"FAILED_EXCEPTION:_{str(e)}", kf_estado, None
 
+# =====================================================================
+# VÍA 2 -> MÓDULO B: MOTOR IRLS CLÁSICO
+# =====================================================================
+def calcular_IRLS_MODO_B(sd_epoca, nav, X_b, Y_b, Z_b, tr, mask_angle):
+    try:
+        y_m, m_m, d_m, h_m, mn_m, sec_m = sd_epoca['_meta']
+        dx_tide, dy_tide, dz_tide = correccion_mareas_solidas(X_b, Y_b, Z_b, tr, y_m, m_m, d_m)
+        X_base_corr = X_b + dx_tide
+        Y_base_corr = Y_b + dy_tide
+        Z_base_corr = Z_b + dz_tide
+        
+        X_iter, Y_iter, Z_iter = X_base_corr, Y_base_corr, Z_base_corr 
+        lat_b, lon_b, alt_b = ecef_a_geodesicas(X_base_corr, Y_base_corr, Z_base_corr)
+        
+        iono = nav.get('_iono', {'alpha': [0]*4, 'beta': [0]*4})
+        alpha, beta = iono['alpha'], iono['beta']
+        
+        sat_positions = {}
+        for s, d in sd_epoca.items():
+            if s == '_meta' or d['sd_P'] is None: continue 
+            tau = d['pr_r'] / C_LIGHT
+            sp = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), tr-tau), tr-tau, tau, s[0])
+            if sp:
+                el_r, az_r = calcular_topocentricas(sp[0], sp[1], sp[2], X_iter, Y_iter, Z_iter)
+                if el_r >= mask_angle:
+                    sat_positions[s] = {'sp': sp, 'el': el_r, 'az': az_r, 'sd_P': d['sd_P'], 'snr': d.get('snr', 30.0)}
+        
+        if len(sat_positions) < 4: return None, "FAILED"
+        
+        sat_list_full = list(sat_positions.keys())
+        constellations = set([s[0] for s in sat_list_full])
+        ref_sats = {}
+        sat_list = []
+        
+        for c in constellations:
+            c_sats = [s for s in sat_list_full if s[0] == c]
+            if len(c_sats) >= 2:
+                ref_sats[c] = max(c_sats, key=lambda k: sat_positions[k]['el'])
+                c_sats.remove(ref_sats[c])
+                sat_list.extend(c_sats)
+        
+        if len(sat_list) < 3: return None, "FAILED" 
+        
+        def calc_rho(sp, X, Y, Z, lat, lon, alt, el, az):
+            dist = math.sqrt((sp[0]-X)**2 + (sp[1]-Y)**2 + (sp[2]-Z)**2)
+            tropo = calcular_saastamoinen(lat, alt, el)
+            iono_m = calcular_klobuchar(lat, lon, el, az, tr, alpha, beta)
+            return dist + tropo, iono_m, dist
+
+        prev_residuals = [0.0] * len(sat_list)
+
+        for iteracion in range(8):
+            lat_it, lon_it, alt_it = ecef_a_geodesicas(X_iter, Y_iter, Z_iter)
+            
+            H = []      
+            L = []      
+            W_diag = [] 
+            
+            ref_calcs = {}
+            for c, r_sat in ref_sats.items():
+                r_data = sat_positions[r_sat]
+                rho_ref_r_base, iono_ref_r, dist_ref_r = calc_rho(r_data['sp'], X_iter, Y_iter, Z_iter, lat_it, lon_it, alt_it, r_data['el'], r_data['az'])
+                el_ref_b, az_ref_b = calcular_topocentricas(r_data['sp'][0], r_data['sp'][1], r_data['sp'][2], X_base_corr, Y_base_corr, Z_base_corr)
+                rho_ref_b_base, iono_ref_b, _ = calc_rho(r_data['sp'], X_base_corr, Y_base_corr, Z_base_corr, lat_b, lon_b, alt_b, el_ref_b, az_ref_b)
+                
+                ref_calcs[c] = {
+                    'dist_ref_r': dist_ref_r,
+                    'SD_P_calc_ref': (rho_ref_r_base + iono_ref_r) - (rho_ref_b_base + iono_ref_b),
+                    'sp': r_data['sp'],
+                    'el': r_data['el'],
+                    'snr': r_data.get('snr', 30.0),
+                    'sd_P': r_data['sd_P']
+                }
+            
+            res_idx = 0
+            for i, s in enumerate(sat_list):
+                c = s[0]
+                data = sat_positions[s]
+                rc = ref_calcs[c]
+                
+                rho_i_r_base, iono_i_r, dist_i_r = calc_rho(data['sp'], X_iter, Y_iter, Z_iter, lat_it, lon_it, alt_it, data['el'], data['az'])
+                el_i_b, az_i_b = calcular_topocentricas(data['sp'][0], data['sp'][1], data['sp'][2], X_base_corr, Y_base_corr, Z_base_corr)
+                rho_i_b_base, iono_i_b, _ = calc_rho(data['sp'], X_base_corr, Y_base_corr, Z_base_corr, lat_b, lon_b, alt_b, el_i_b, az_i_b)
+                
+                SD_P_calc_i = (rho_i_r_base + iono_i_r) - (rho_i_b_base + iono_i_b)
+                DD_P_calc = SD_P_calc_i - rc['SD_P_calc_ref']
+                
+                dx_geom = [
+                    -(data['sp'][0] - X_iter) / dist_i_r - (-(rc['sp'][0] - X_iter) / rc['dist_ref_r']),
+                    -(data['sp'][1] - Y_iter) / dist_i_r - (-(rc['sp'][1] - Y_iter) / rc['dist_ref_r']),
+                    -(data['sp'][2] - Z_iter) / dist_i_r - (-(rc['sp'][2] - Z_iter) / rc['dist_ref_r'])
+                ]
+                
+                sin_el_i_sq = math.sin(math.radians(data['el']))**2
+                sin_el_ref_sq = math.sin(math.radians(rc['el']))**2
+                snr_i_pow = 10.0 ** (data.get('snr', 30.0) / 10.0)
+                snr_ref_pow = 10.0 ** (rc['snr'] / 10.0)
+                
+                w_i_ref = (sin_el_i_sq * snr_i_pow * sin_el_ref_sq * snr_ref_pow) / max(1.0, (sin_el_i_sq * snr_i_pow) + (sin_el_ref_sq * snr_ref_pow))
+
+                DD_P_obs = data['sd_P'] - rc['sd_P']
+                res_P = DD_P_obs - DD_P_calc
+                
+                L.append([res_P])
+                H.append(dx_geom)
+                
+                if iteracion == 0:
+                    w_P = w_i_ref * 1.0
+                else:
+                    w_P = w_i_ref * 1.0 / max(1.0, abs(prev_residuals[res_idx]) / 2.0)
+                W_diag.append(w_P)
+                res_idx += 1
+
+            H_T = transpose_matrix(H)
+            if not H_T or not W_diag: return None, "FAILED" 
+            
+            try:
+                H_T_W = [[H_T[r][idx] * W_diag[idx] for idx in range(len(W_diag))] for r in range(len(H_T))]
+            except IndexError:
+                return None, "FAILED"
+
+            N_mat = matmul(H_T_W, H)
+            
+            for r in range(len(N_mat)):
+                N_mat[r][r] += abs(N_mat[r][r]) * 1e-6 + 1e-6
+                
+            U_vec = matmul(H_T_W, L)
+            
+            Q = invert_matrix_nxn(N_mat)
+            if not Q: return None, "FAILED"
+            
+            Delta_X = matmul(Q, U_vec)
+            if not Delta_X or len(Delta_X) < 3 or not Delta_X[0]: return None, "FAILED" 
+
+            X_iter += Delta_X[0][0]; Y_iter += Delta_X[1][0]; Z_iter += Delta_X[2][0]
+                
+            prev_residuals = []
+            for r in range(len(H)):
+                v_val = sum(H[r][idx] * Delta_X[idx][0] for idx in range(len(H[0]))) - L[r][0]
+                prev_residuals.append(v_val)
+            
+            if max(abs(Delta_X[0][0]), abs(Delta_X[1][0]), abs(Delta_X[2][0])) < 1e-3:
+                return (X_iter - dx_tide, Y_iter - dy_tide, Z_iter - dz_tide), "FLOAT (DGPS Clásico Termux)"
+                
+        return (X_iter - dx_tide, Y_iter - dy_tide, Z_iter - dz_tide), "FLOAT (DGPS Clásico Termux)"
+    except Exception as e:
+        return None, f"FAILED_EXCEPTION:_{str(e)}"
+
+# =====================================================================
+# VÍA 3 -> MÓDULO C: NUEVO MOTOR PPK L1+L5 (DOBLE FRECUENCIA SIMULTÁNEA)
+# =====================================================================
 def procesar_ekF_PPK_L1_L5(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_mask):
     try:
         tow_b = sd_epoca.get('_tow_b', tr)
+        
         X_pri = [[kf_estado['X'][0][0]], [kf_estado['X'][1][0]], [kf_estado['X'][2][0]]]
         P_pri = [row[:] for row in kf_estado['P']]
         h_r = kf_estado.get('h_r', 0.0)
+        
         if 'prev_cp' not in kf_estado: kf_estado['prev_cp'] = {}
+        
         X_iter, Y_iter, Z_iter = X_pri[0][0], X_pri[1][0], X_pri[2][0]
         lat_r, lon_r, alt_r = ecef_a_geodesicas(X_iter, Y_iter, Z_iter)
         lat_rad, lon_rad = math.radians(lat_r), math.radians(lon_r)
         
-        X_apc, Y_apc, Z_apc = X_iter + h_r * math.cos(lat_rad) * math.cos(lon_rad), Y_iter + h_r * math.cos(lat_rad) * math.sin(lon_rad), Z_iter + h_r * math.sin(lat_rad)
+        X_apc = X_iter + h_r * math.cos(lat_rad) * math.cos(lon_rad)
+        Y_apc = Y_iter + h_r * math.cos(lat_rad) * math.sin(lon_rad)
+        Z_apc = Z_iter + h_r * math.sin(lat_rad)
+        
         alpha, beta = nav.get('_iono', {}).get('alpha', [0]*4), nav.get('_iono', {}).get('beta', [0]*4)
         
         y_m, m_m, d_m, h_m, mn_m, sec_m = sd_epoca['_meta']
@@ -982,7 +1260,9 @@ def procesar_ekF_PPK_L1_L5(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_ma
         sat_positions = {}
         for s, d in sd_epoca.items():
             if s == '_meta' or s == '_tow_b' or 'C1' not in d or d['C1']['sd_P'] is None: continue 
-            tau_r, tau_b = d['C1']['pr_r'] / C_LIGHT, d['C1']['pr_b'] / C_LIGHT
+            
+            tau_r = d['C1']['pr_r'] / C_LIGHT 
+            tau_b = d['C1']['pr_b'] / C_LIGHT
             t_emision_r, t_emision_b = tr - tau_r, tow_b - tau_b
             
             sp_r, sp_b = None, None
@@ -1009,6 +1289,7 @@ def procesar_ekF_PPK_L1_L5(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_ma
         constellations = set([s[0] for s in sat_list_full])
         ref_sats = {}
         sat_list = []
+        
         for c in constellations:
             c_sats = [s for s in sat_list_full if s[0] == c]
             if len(c_sats) >= 2:
@@ -1033,7 +1314,7 @@ def procesar_ekF_PPK_L1_L5(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_ma
             rho_b, iono_b_L5, _ = calc_rho(info['sp_b'], X_base_corr, Y_base_corr, Z_base_corr, lat_base, lon_base, alt_base, el_b, az_b, WAVE_L5, tow_b)
             base_calcs[s] = {'P1': rho_b + iono_b_L1, 'CP1': rho_b - iono_b_L1, 'P5': rho_b + iono_b_L5, 'CP5': rho_b - iono_b_L5}
 
-        H, L, R_diag = [], [], []
+        H = []; L = []; R_diag = []
         c_ref = {}
         for c, r_sat in ref_sats.items():
             info = sat_positions[r_sat]
@@ -1053,7 +1334,12 @@ def procesar_ekF_PPK_L1_L5(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_ma
             rho_i_r, iono_i_L1, dist_i_r = calc_rho(info['sp_r'], X_apc, Y_apc, Z_apc, lat_r, lon_r, alt_r + h_r, el_i_r, az_i_r, WAVE_L1, tr)
             rho_i_r, iono_i_L5, _ = calc_rho(info['sp_r'], X_apc, Y_apc, Z_apc, lat_r, lon_r, alt_r + h_r, el_i_r, az_i_r, WAVE_L5, tr)
             
-            dx_geom = [-(info['sp_r'][0] - X_apc) / dist_i_r - (-(rc['sp_r'][0] - X_apc) / rc['dist_r']), -(info['sp_r'][1] - Y_apc) / dist_i_r - (-(rc['sp_r'][1] - Y_apc) / rc['dist_r']), -(info['sp_r'][2] - Z_apc) / dist_i_r - (-(rc['sp_r'][2] - Z_apc) / rc['dist_r'])]
+            dx_geom = [
+                -(info['sp_r'][0] - X_apc) / dist_i_r - (-(rc['sp_r'][0] - X_apc) / rc['dist_r']),
+                -(info['sp_r'][1] - Y_apc) / dist_i_r - (-(rc['sp_r'][1] - Y_apc) / rc['dist_r']),
+                -(info['sp_r'][2] - Z_apc) / dist_i_r - (-(rc['sp_r'][2] - Z_apc) / rc['dist_r'])
+            ]
+            
             var_base_1 = (10.0 ** (-info['data']['C1']['snr'] / 10.0)) * 100.0
             var_base_5 = (10.0 ** (-info['data']['C5']['snr'] / 10.0)) * 100.0
             
@@ -1086,6 +1372,7 @@ def procesar_ekF_PPK_L1_L5(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_ma
                     kf_estado['fix_flags'] += 1
 
         if not H: return None, "FAILED", kf_estado, None
+        
         H_T = transpose_matrix(H)
         R_inv = matid(len(R_diag))
         for i in range(len(R_diag)): R_inv[i][i] = 1.0 / max(1e-6, R_diag[i])
@@ -1095,158 +1382,67 @@ def procesar_ekF_PPK_L1_L5(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_ma
         
         H_T_R_inv = matmul(H_T, R_inv)
         N_mat = matadd(matmul(H_T_R_inv, H), P_inv)
+        U_vec = matmul(H_T_R_inv, L)
+        
         Q_cov = invert_matrix_nxn(N_mat)
         if not Q_cov: return None, "FAILED", kf_estado, None
         
-        Delta_X = matmul(Q_cov, matmul(H_T_R_inv, L))
+        Delta_X = matmul(Q_cov, U_vec)
         X_post = [[X_pri[0][0] + Delta_X[0][0]], [X_pri[1][0] + Delta_X[1][0]], [X_pri[2][0] + Delta_X[2][0]]]
         
-        kf_estado['X'] = X_post; kf_estado['P'] = Q_cov
+        kf_estado['X'] = X_post
+        kf_estado['P'] = Q_cov
+        
         status = "FIXED (PPK DUAL)" if kf_estado['fix_flags'] > 4 else "FLOAT (DGPS DUAL)"
         kf_estado['fix_flags'] = 0 
         
-        state_dict = {'tow': tr, 'X_pri': X_pri, 'P_pri': P_pri, 'X_post': X_post, 'P_post': Q_cov, 'tide': (dx_tide, dy_tide, dz_tide)}
+        state_dict = {
+            'tow': tr, 'X_pri': X_pri, 'P_pri': P_pri, 'X_post': X_post, 'P_post': Q_cov, 'tide': (dx_tide, dy_tide, dz_tide)
+        }
+        
         return (X_post[0][0] - dx_tide, X_post[1][0] - dy_tide, X_post[2][0] - dz_tide), status, kf_estado, state_dict
+
     except Exception as e:
         return None, f"FAILED_EXCEPTION:_{str(e)}", kf_estado, None
 
 # =====================================================================
-# MOTOR INDIVIDUAL: MÓDULO B (MOTOR IRLS CLÁSICO)
-# =====================================================================
-def calcular_IRLS_MODO_B(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle):
-    try:
-        y_m, m_m, d_m, h_m, mn_m, sec_m = sd_epoca['_meta']
-        dx_tide, dy_tide, dz_tide = correccion_mareas_solidas(X_b, Y_b, Z_b, tr, y_m, m_m, d_m)
-        X_base_corr = X_b + dx_tide
-        Y_base_corr = Y_b + dy_tide
-        Z_base_corr = Z_b + dz_tide
-
-        X_iter, Y_iter, Z_iter = X_base_corr, Y_base_corr, Z_base_corr 
-        lat_b, lon_b, alt_b = ecef_a_geodesicas(X_base_corr, Y_base_corr, Z_base_corr)
-        
-        iono = nav.get('_iono', {'alpha': [0]*4, 'beta': [0]*4})
-        alpha, beta = iono['alpha'], iono['beta']
-        
-        sat_positions = {}
-        for s, d in sd_epoca.items():
-            if s == '_meta' or d['sd_P'] is None: continue 
-            tau = d['pr_r'] / C_LIGHT
-            t_emision = tr - tau
-            
-            sp = None
-            if sp3 and s in sp3:
-                sp3_res = interpolate_sp3(sp3, s, t_emision)
-                if sp3_res:
-                    theta = OMEGA_E * tau
-                    xs = sp3_res[0] * math.cos(theta) + sp3_res[1] * math.sin(theta)
-                    ys = -sp3_res[0] * math.sin(theta) + sp3_res[1] * math.cos(theta)
-                    sp = (xs, ys, sp3_res[2], sp3_res[3])
-                    
-            if not sp:
-                sp = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), t_emision), t_emision, tau, s[0])
-                
-            if sp:
-                el_r, az_r = calcular_topocentricas(sp[0], sp[1], sp[2], X_iter, Y_iter, Z_iter)
-                if el_r >= mask_angle:
-                    sat_positions[s] = {'sp': sp, 'el': el_r, 'az': az_r, 'sd_P': d['sd_P'], 'snr': d.get('snr', 30.0)}
-        
-        if len(sat_positions) < 4: return None, "FAILED"
-        
-        sat_list_full = list(sat_positions.keys())
-        constellations = set([s[0] for s in sat_list_full])
-        ref_sats = {}
-        sat_list = []
-        for c in constellations:
-            c_sats = [s for s in sat_list_full if s[0] == c]
-            if len(c_sats) >= 2:
-                ref_sats[c] = max(c_sats, key=lambda k: sat_positions[k]['el'])
-                c_sats.remove(ref_sats[c])
-                sat_list.extend(c_sats)
-        
-        if len(sat_list) < 3: return None, "FAILED" 
-        
-        def calc_rho(sp, X, Y, Z, lat, lon, alt, el, az):
-            dist = math.sqrt((sp[0]-X)**2 + (sp[1]-Y)**2 + (sp[2]-Z)**2)
-            tropo = calcular_saastamoinen(lat, alt, el)
-            iono_m = calcular_klobuchar(lat, lon, el, az, tr, alpha, beta)
-            return dist + tropo, iono_m, dist
-
-        prev_residuals = [0.0] * len(sat_list)
-
-        for iteracion in range(8):
-            lat_it, lon_it, alt_it = ecef_a_geodesicas(X_iter, Y_iter, Z_iter)
-            H, L, W_diag = [], [], []
-            ref_calcs = {}
-            for c, r_sat in ref_sats.items():
-                r_data = sat_positions[r_sat]
-                rho_ref_r_base, iono_ref_r, dist_ref_r = calc_rho(r_data['sp'], X_iter, Y_iter, Z_iter, lat_it, lon_it, alt_it, r_data['el'], r_data['az'])
-                el_ref_b, az_ref_b = calcular_topocentricas(r_data['sp'][0], r_data['sp'][1], r_data['sp'][2], X_base_corr, Y_base_corr, Z_base_corr)
-                rho_ref_b_base, iono_ref_b, _ = calc_rho(r_data['sp'], X_base_corr, Y_base_corr, Z_base_corr, lat_base, lon_base, alt_base, el_ref_b, az_ref_b)
-                ref_calcs[c] = {'dist_ref_r': dist_ref_r, 'SD_P_calc_ref': (rho_ref_r_base + iono_ref_r) - (rho_ref_b_base + iono_ref_b), 'sp': r_data['sp'], 'el': r_data['el'], 'snr': r_data.get('snr', 30.0), 'sd_P': r_data['sd_P']}
-            
-            res_idx = 0
-            for i, s in enumerate(sat_list):
-                c = s[0]; data = sat_positions[s]; rc = ref_calcs[c]
-                rho_i_r_base, iono_i_r, dist_i_r = calc_rho(data['sp'], X_iter, Y_iter, Z_iter, lat_it, lon_it, alt_it, data['el'], data['az'])
-                el_i_b, az_i_b = calcular_topocentricas(data['sp'][0], data['sp'][1], data['sp'][2], X_base_corr, Y_base_corr, Z_base_corr)
-                rho_i_b_base, iono_i_b, _ = calc_rho(data['sp'], X_base_corr, Y_base_corr, Z_base_corr, lat_base, lon_base, alt_base, el_i_b, az_i_b)
-                
-                SD_P_calc_i = (rho_i_r_base + iono_i_r) - (rho_i_b_base + iono_i_b)
-                DD_P_calc = SD_P_calc_i - rc['SD_P_calc_ref']
-                dx_geom = [-(data['sp'][0] - X_iter) / dist_i_r - (-(rc['sp'][0] - X_iter) / rc['dist_ref_r']), -(data['sp'][1] - Y_iter) / dist_i_r - (-(rc['sp'][1] - Y_iter) / rc['dist_ref_r']), -(data['sp'][2] - Z_iter) / dist_i_r - (-(rc['sp'][2] - Z_iter) / rc['dist_ref_r'])]
-                
-                sin_el_i_sq, sin_el_ref_sq = math.sin(math.radians(data['el']))**2, math.sin(math.radians(rc['el']))**2
-                snr_i_pow, snr_ref_pow = 10.0 ** (data.get('snr', 30.0) / 10.0), 10.0 ** (rc['snr'] / 10.0)
-                w_i_ref = (sin_el_i_sq * snr_i_pow * sin_el_ref_sq * snr_ref_pow) / max(1.0, (sin_el_i_sq * snr_i_pow) + (sin_el_ref_sq * snr_ref_pow))
-
-                L.append([data['sd_P'] - rc['sd_P'] - DD_P_calc])
-                H.append(dx_geom)
-                W_diag.append(w_i_ref * 1.0 if iteracion == 0 else w_i_ref * 1.0 / max(1.0, abs(prev_residuals[res_idx]) / 2.0))
-                res_idx += 1
-
-            H_T = transpose_matrix(H)
-            if not H_T or not W_diag: return None, "FAILED" 
-            try: H_T_W = [[H_T[r][idx] * W_diag[idx] for idx in range(len(W_diag))] for r in range(len(H_T))]
-            except IndexError: return None, "FAILED"
-
-            N_mat = matmul(H_T_W, H)
-            for r in range(len(N_mat)): N_mat[r][r] += abs(N_mat[r][r]) * 1e-6 + 1e-6
-            Q = invert_matrix_nxn(N_mat)
-            if not Q: return None, "FAILED"
-            
-            Delta_X = matmul(Q, matmul(H_T_W, L))
-            if not Delta_X or len(Delta_X) < 3 or not Delta_X[0]: return None, "FAILED" 
-
-            X_iter += Delta_X[0][0]; Y_iter += Delta_X[1][0]; Z_iter += Delta_X[2][0]
-            prev_residuals = [sum(H[r][idx] * Delta_X[idx][0] for idx in range(len(H[0]))) - L[r][0] for r in range(len(H))]
-            
-            if max(abs(Delta_X[0][0]), abs(Delta_X[1][0]), abs(Delta_X[2][0])) < 1e-3:
-                return (X_iter - dx_tide, Y_iter - dy_tide, Z_iter - dz_tide), "FLOAT (DGPS Clásico + SP3)"
-                
-        return (X_iter - dx_tide, Y_iter - dy_tide, Z_iter - dz_tide), "FLOAT (DGPS Clásico + SP3)"
-    except Exception as e:
-        return None, f"FAILED_EXCEPTION:_{str(e)}"
-
-# =====================================================================
-# ESTADÍSTICAS Y FILTRADO VINCULANTE
+# ESTADÍSTICAS Y FILTRADO VINCULANTE (HARD FILTER)
 # =====================================================================
 def estadistica_desacoplada(coordenadas, conf_plani, conf_alti, err_hor_max, err_ver_max):
     if not coordenadas: return None, None, None, 0, 0, 0, 0, 0.0
-    N_list, E_list, Z_list = [c[0] for c in coordenadas], [c[1] for c in coordenadas], [c[2] for c in coordenadas]
+    
+    N_list = [c[0] for c in coordenadas]
+    E_list = [c[1] for c in coordenadas]
+    Z_list = [c[2] for c in coordenadas]
 
     def get_median(lst):
         s = sorted(lst); n = len(s)
-        return 0 if n == 0 else (s[n//2] if n % 2 == 1 else (s[n//2 - 1] + s[n//2]) / 2.0)
+        if n == 0: return 0
+        return s[n//2] if n % 2 == 1 else (s[n//2 - 1] + s[n//2]) / 2.0
 
-    med_N, med_E, med_Z = get_median(N_list), get_median(E_list), get_median(Z_list)
-    valid_coords = [c for c in coordenadas if not ((err_hor_max > 0.0 and math.hypot(c[0] - med_N, c[1] - med_E) > err_hor_max) or (err_ver_max > 0.0 and abs(c[2] - med_Z) > err_ver_max))]
+    med_N = get_median(N_list)
+    med_E = get_median(E_list)
+    med_Z = get_median(Z_list)
+    
+    valid_coords = []
+    for c in coordenadas:
+        dh = math.hypot(c[0] - med_N, c[1] - med_E)
+        dv = abs(c[2] - med_Z)
+        
+        if (err_hor_max > 0.0 and dh > err_hor_max) or (err_ver_max > 0.0 and dv > err_ver_max):
+            continue
+        valid_coords.append(c)
 
     if not valid_coords: return None, None, None, 0, 0, 0, 0, 0.0
-    N_v, E_v, Z_v = [c[0] for c in valid_coords], [c[1] for c in valid_coords], [c[2] for c in valid_coords]
+    
+    N_v = [c[0] for c in valid_coords]
+    E_v = [c[1] for c in valid_coords]
+    Z_v = [c[2] for c in valid_coords]
     f_v = [c[3] for c in valid_coords if len(c) > 3 and "FIXED" in c[3]]
 
     def calc_mean_std(arr):
-        n = len(arr); m = sum(arr) / n
+        n = len(arr)
+        m = sum(arr) / n
         return m, (math.sqrt(sum((x - m)**2 for x in arr) / n) if n > 1 else 0.0)
 
     N_m, N_s = calc_mean_std(N_v)
@@ -1288,8 +1484,12 @@ def generar_informe_homogeneizacion_detallado(base_name, rover_name, base_raw, r
                     sats_unicos.add(s)
                     if 'C1' in data or 'L1' in data: tiene_l1 = True
                     if 'C5' in data or 'L5' in data: tiene_l5 = True
-                    if 'S1' in data and data['S1'] > 0: snr_total += data['S1']; snr_count += 1
-                    if 'S5' in data and data['S5'] > 0: snr_total += data['S5']; snr_count += 1
+                    if 'S1' in data and data['S1'] > 0:
+                        snr_total += data['S1']
+                        snr_count += 1
+                    if 'S5' in data and data['S5'] > 0:
+                        snr_total += data['S5']
+                        snr_count += 1
                         
         tipo_senal = "L1+L5 (Doble Frecuencia)" if (tiene_l1 and tiene_l5) else ("L1 (Monofrecuencia)" if tiene_l1 else "C1 (Solo Código)")
         avg_snr = (snr_total / snr_count) if snr_count > 0 else 0.0
@@ -1351,10 +1551,17 @@ def generar_informe_homogeneizacion_detallado(base_name, rover_name, base_raw, r
 
 def generar_informe_ascii(tipo, p_dict):
     estado_sol = f"HÍBRIDO PPK/EKF ({p_dict.get('fix_r', 0.0):.1f}% FIXED)" if p_dict.get('fix_r', 0.0) > 0 else 'FLOAT'
+    
     if p_dict.get('estrategia') in ['MODO_B_ASINCRONO', 'MODO_B_FASE']:
-        estado_sol = 'FLOAT (DGPS IRLS + Site Calibration)' if p_dict.get('shift_applied') else 'FLOAT (DGPS Clásico Termux)'
+        if p_dict.get('shift_applied'):
+            estado_sol = 'FLOAT (DGPS IRLS + Site Calibration)'
+        else:
+            estado_sol = 'FLOAT (DGPS Clásico Termux)'
     elif p_dict.get('estrategia') == 'MODO_C_PPK':
-        estado_sol = f"PPK DUAL FRECUENCIA L1+L5 ({p_dict.get('fix_r', 0.0):.1f}% FIXED)" if p_dict.get('fix_r', 0.0) > 0 else 'FLOAT DUAL'
+        if p_dict.get('fix_r', 0.0) > 0:
+            estado_sol = f"PPK DUAL FRECUENCIA L1+L5 ({p_dict.get('fix_r', 0.0):.1f}% FIXED)"
+        else:
+            estado_sol = 'FLOAT DUAL'
     elif p_dict.get('fix_r', 0.0) == 0.0:
         estado_sol = 'FLOAT (EKF)'
         
@@ -1362,6 +1569,7 @@ def generar_informe_ascii(tipo, p_dict):
     err_v_str = f"± {f_14(p_dict['err_v'])} m (Vinculante)" if p_dict['err_v'] > 0 else 'Inactiva'
     sp3_str = p_dict.get('sp3_file') if p_dict.get('sp3_file') else "No provisto (Fallback a Broadcast NAV)"
     nav_str = p_dict.get('nav_file', "auto_nav.nav")
+    
     fecha_calculo = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     shift_bloque = ""
@@ -1373,9 +1581,10 @@ def generar_informe_ascii(tipo, p_dict):
   [-] Sesgo Este Descontado  : {f_14(p_dict.get('bias_e', 0.0))} m
   [-] Sesgo Cota Descontado  : {f_14(p_dict.get('bias_z', 0.0))} m
 """
+    
     informe = f"""
 ========================================================================
-             INFORME DE PROCESAMIENTO GNSSJP PRO
+             INFORME DE PROCESAMIENTO GNSSJP PRO (V19)
 ========================================================================
 
 [*] RESULTADO DE MEDICIÓN ABSOLUTA ({estado_sol})
@@ -1386,6 +1595,7 @@ def generar_informe_ascii(tipo, p_dict):
   [-] Máscara Elevación      : {f_14(p_dict['mask'])}°
   [-] Filtro Planimétrico    : {f_14(p_dict['cp'])} Sigma
   [-] Filtro Altimétrico     : {f_14(p_dict['ca'])} Sigma
+  [-] Tolerancia Sync        : {f_14(p_dict.get('max_gap', 0.5))} s
   [-] Tasa Ambiguity FIX     : {p_dict.get('fix_r', 0.0):.2f}% (Resolución Entera)
   [-] Épocas Útiles Retenidas: {p_dict['ret']} ({(p_dict['ret']/max(1, p_dict['total']))*100:.2f}% del total)
   [-] Motor Matemático Activo: {p_dict.get('estrategia', 'Módulo A (EKF Homogéneo)')}
@@ -1418,31 +1628,53 @@ def generar_informe_ascii(tipo, p_dict):
     return informe
 
 # =====================================================================
-# RUTAS FLASK
+# RUTAS FLASK (ENRUTADOR AUTÓNOMO Y TRIPLE VÍA AISLADA)
 # =====================================================================
 @app.route('/')
 def index():
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return send_file(os.path.join(base_dir, 'index.html'))
+    index_path = os.path.join(base_dir, 'index.html')
+    return send_file(index_path)
 
 @app.route('/API/tab1_homogenizar', methods=['POST'])
 def tab1_homogenizar():
     with STATE_LOCK:
-        if os.path.exists(UPLOAD_FOLDER): shutil.rmtree(UPLOAD_FOLDER, ignore_errors=True)
+        if os.path.exists(UPLOAD_FOLDER):
+            shutil.rmtree(UPLOAD_FOLDER, ignore_errors=True)
         os.makedirs(UPLOAD_FOLDER, exist_ok=True)
     
-    url_base, url_rover = request.form.get('url_base'), request.form.get('url_rover')
-    utm_n, utm_e, utm_c = safe_f(request.form.get('utm_norte'), 0.0), safe_f(request.form.get('utm_este'), 0.0), safe_f(request.form.get('utm_cota'), 0.0)
-    utm_h, utm_hem = safe_i(request.form.get('utm_huso'), 19), request.form.get('utm_hemisferio', 'N')
-    utm_n_r, utm_e_r, utm_c_r = safe_f(request.form.get('utm_norte_r'), 0.0), safe_f(request.form.get('utm_este_r'), 0.0), safe_f(request.form.get('utm_cota_r'), 0.0)
-    h_b, h_r = safe_f(request.form.get('altura_base'), 0.0), safe_f(request.form.get('altura_rover'), 0.0)
+    url_base = request.form.get('url_base')
+    url_rover = request.form.get('url_rover')
+    
+    utm_n = safe_f(request.form.get('utm_norte'), 0.0)
+    utm_e = safe_f(request.form.get('utm_este'), 0.0)
+    utm_c = safe_f(request.form.get('utm_cota'), 0.0)
+    utm_h = safe_i(request.form.get('utm_huso'), 19)
+    utm_hem = request.form.get('utm_hemisferio', 'N')
+    
+    utm_n_r = safe_f(request.form.get('utm_norte_r'), 0.0)
+    utm_e_r = safe_f(request.form.get('utm_este_r'), 0.0)
+    utm_c_r = safe_f(request.form.get('utm_cota_r'), 0.0)
+    
+    h_b = safe_f(request.form.get('altura_base'), 0.0)
+    h_r = safe_f(request.form.get('altura_rover'), 0.0)
 
-    for k, v in [('utm_norte', utm_n), ('utm_este', utm_e), ('utm_cota', utm_c), ('utm_huso', utm_h), ('utm_hemisferio', utm_hem), ('utm_norte_r', utm_n_r), ('utm_este_r', utm_e_r), ('utm_cota_r', utm_c_r), ('altura_base', h_b), ('altura_rover', h_r)]:
-        guardar_estado(k, v)
+    guardar_estado('utm_norte', utm_n)
+    guardar_estado('utm_este', utm_e)
+    guardar_estado('utm_cota', utm_c)
+    guardar_estado('utm_huso', utm_h)
+    guardar_estado('utm_hemisferio', utm_hem)
+    guardar_estado('utm_norte_r', utm_n_r)
+    guardar_estado('utm_este_r', utm_e_r)
+    guardar_estado('utm_cota_r', utm_c_r)
+    guardar_estado('altura_base', h_b)
+    guardar_estado('altura_rover', h_r)
     
-    if not url_base or not url_rover: return Response("[CAJA_ERROR] Enlaces de Google Drive faltantes.\n", mimetype='text/plain')
+    if not url_base or not url_rover: 
+        return Response("> [ERROR CRÍTICO] Enlaces de Google Drive faltantes.\n", mimetype='text/plain')
     
-    p_b_raw, p_r_raw = os.path.join(UPLOAD_FOLDER, 'base_raw.obs'), os.path.join(UPLOAD_FOLDER, 'rover_calibracion_raw.obs')
+    p_b_raw = os.path.join(UPLOAD_FOLDER, 'base_raw.obs')
+    p_r_raw = os.path.join(UPLOAD_FOLDER, 'rover_calibracion_raw.obs')
 
     def procesar():
         try:
@@ -1451,38 +1683,57 @@ def tab1_homogenizar():
             yield "> [RED] Descargando RINEX Rover desde Google Drive...\n"
             descargar_desde_gdrive(url_rover, p_r_raw)
 
-            yield f"\n> [SISTEMA] Iniciando Etapa 1: Emparejamiento Base Pivote y Rover...\n"
-            base_raw_dict, rover_raw_dict = parse_rinex_obs_completo(p_b_raw), parse_rinex_obs_completo(p_r_raw)
+            yield f"\n> [SISTEMA] Iniciando Etapa 1: Emparejamiento Base Pivote y Rover de Calibración...\n"
+            base_raw_dict = parse_rinex_obs_completo(p_b_raw)
+            rover_raw_dict = parse_rinex_obs_completo(p_r_raw)
             
-            yield "> [ENRUTADOR] Evaluando calidad de señales y asignando módulo excluyente...\n"
+            yield "> [ENRUTADOR] Evaluando calidad de señales y sincronía geométrica...\n"
             modo_str, ratio, msg = analizar_calidad_y_senales_rinex(base_raw_dict, rover_raw_dict, max_gap_tolerado=0.5)
-            yield f"  [-] Módulo pre-asignado: {modo_str}\n  [-] Justificación: {msg}\n\n"
+            yield f"  [-] Módulo pre-asignado: {modo_str}\n"
+            yield f"  [-] Justificación: {msg}\n\n"
             
             base_sinc, rover_sinc = {}, {}
             total_epochs = len(rover_raw_dict)
-            for c, tr in enumerate(sorted(list(rover_raw_dict.keys())), 1):
-                if total_epochs > 0 and c % max(1, total_epochs // 10) == 0: yield f"[PROGRESO] Cotejando épocas sin distorsión... {int((c / total_epochs) * 100)}%\n"
+            c = 0
+            for tr in sorted(list(rover_raw_dict.keys())):
+                c += 1
+                if total_epochs > 0 and c % max(1, total_epochs // 10) == 0: 
+                    yield f"[PROGRESO] Cotejando épocas sin distorsión... {int((c / total_epochs) * 100)}%\n"
+                
                 base_interp = interpolar_base_a_rover(base_raw_dict, tr, max_gap=float('inf'))
+                
                 if base_interp:
-                    base_sinc[tr] = base_interp; base_sinc[tr]['_meta'] = rover_raw_dict[tr]['_meta']
+                    base_sinc[tr] = base_interp
+                    base_sinc[tr]['_meta'] = rover_raw_dict[tr]['_meta']
                     rover_sinc[tr] = rover_raw_dict[tr]
             
-            if not base_sinc: yield "\n[CAJA_ERROR] Cero épocas en común. Revisar rango horario."; return
-            p_b_h, p_r_h = os.path.join(UPLOAD_FOLDER, 'base_calib_homo.obs'), os.path.join(UPLOAD_FOLDER, 'rover_calib_homo.obs')
+            if not base_sinc: yield "\n> [ERROR FATAL] Cero épocas en común. Revisar rango horario."; return
+            p_b_h = os.path.join(UPLOAD_FOLDER, 'base_calib_homo.obs')
+            p_r_h = os.path.join(UPLOAD_FOLDER, 'rover_calib_homo.obs')
             generar_rinex_sincronizado(p_b_raw, p_b_h, base_sinc)
             generar_rinex_sincronizado(p_r_raw, p_r_h, rover_sinc)
             
-            for k, v in [('base_raw', p_b_raw), ('base_calib_homo', p_b_h), ('rover_calib_homo', p_r_h), ('name_base_raw', "Drive_Base_Pivote.obs"), ('name_rover_calib_raw', "Drive_Rover_Calib.obs")]:
-                guardar_estado(k, v)
-                
-            yield generar_informe_homogeneizacion_detallado("Drive_Base_Pivote.obs", "Drive_Rover_Calib.obs", base_raw_dict, rover_raw_dict, rover_sinc, modo_str, msg, {'N': utm_n, 'E': utm_e, 'Z': utm_c}, {'N': utm_n_r, 'E': utm_e_r, 'Z': utm_c_r})
+            guardar_estado('base_raw', p_b_raw)
+            guardar_estado('base_calib_homo', p_b_h)
+            guardar_estado('rover_calib_homo', p_r_h)
+            
+            name_base = "Drive_Base_Pivote.obs"
+            name_rover = "Drive_Rover_Calib.obs"
+            guardar_estado('name_base_raw', name_base)
+            guardar_estado('name_rover_calib_raw', name_rover)
+            
+            c_base = {'N': utm_n, 'E': utm_e, 'Z': utm_c}
+            c_rover = {'N': utm_n_r, 'E': utm_e_r, 'Z': utm_c_r}
+            
+            yield generar_informe_homogeneizacion_detallado(name_base, name_rover, base_raw_dict, rover_raw_dict, rover_sinc, modo_str, msg, c_base, c_rover)
             yield "\n[SUCCESS]"
-        except Exception as e: yield f"\n[CAJA_ERROR] Falla estructural: {str(e)}"
+        except Exception as e: yield f"\n> [ERROR] Falla estructural: {str(e)}"
     return Response(procesar(), mimetype='text/plain')
 
 @app.route('/API/tab2_efemerides', methods=['POST'])
 def tab2_efemerides():
     f_sp3 = request.files.get('file_sp3')
+    
     sp3_path = None
     if f_sp3 and f_sp3.filename != '':
         sp3_path = os.path.join(UPLOAD_FOLDER, 'manual_sp3.sp3')
@@ -1501,120 +1752,171 @@ def tab2_efemerides():
 
             yield "\n> [RED] Conectando con Red Global de Repositorios GNSS...\n"
             bp = leer_estado('base_raw')
-            if not bp or not os.path.exists(bp): yield "[CAJA_ERROR] Falta RINEX Base en memoria para extraer fecha.\n"; return
+            if not bp or not os.path.exists(bp): 
+                yield "> [ERROR FATAL] Falta RINEX Base en memoria para extraer fecha.\n"; return
             
             ft = obtener_fecha_obs(bp)
-            if not ft: yield "[CAJA_ERROR] Imposible extraer la fecha del RINEX Base.\n"; return
+            if not ft: yield "> [ERROR FATAL] Imposible extraer la fecha del RINEX Base.\n"; return
             
             year, month, day = ft[0], ft[1], ft[2]
-            doy = datetime.datetime(year, month, day).timetuple().tm_yday
+            dt = datetime.datetime(year, month, day)
+            doy = dt.timetuple().tm_yday
             yy = str(year)[-2:]
             
-            nav_gz, nav_path = os.path.join(UPLOAD_FOLDER, f"auto_nav_{year}_{doy:03d}.nav.gz"), os.path.join(UPLOAD_FOLDER, f"auto_nav_{year}_{doy:03d}.nav")
+            nav_gz = os.path.join(UPLOAD_FOLDER, f"auto_nav_{year}_{doy:03d}.nav.gz")
+            nav_path = os.path.join(UPLOAD_FOLDER, f"auto_nav_{year}_{doy:03d}.nav")
+            
             ctx = ssl.create_default_context()
-            ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
             
             if not os.path.exists(nav_path):
-                urls_to_try = [f"https://garner.ucsd.edu/pub/rinex/{year}/{doy:03d}/brdc{doy:03d}0.{yy}n.gz", f"http://igs.bkg.bund.de/root_ftp/IGS/BRDC/{year}/{doy:03d}/brdc{doy:03d}0.{yy}n.gz", f"https://www.epncb.oma.be/ftp/obs/BRDC/{year}/{doy:03d}/brdc{doy:03d}0.{yy}n.gz", f"http://igs.bkg.bund.de/root_ftp/IGS/BRDC/{year}/{doy:03d}/BRDC00IGS_R_{year}{doy:03d}0000_01D_MN.rnx.gz"]
+                urls_to_try = [
+                    f"https://garner.ucsd.edu/pub/rinex/{year}/{doy:03d}/brdc{doy:03d}0.{yy}n.gz",
+                    f"http://igs.bkg.bund.de/root_ftp/IGS/BRDC/{year}/{doy:03d}/brdc{doy:03d}0.{yy}n.gz",
+                    f"https://www.epncb.oma.be/ftp/obs/BRDC/{year}/{doy:03d}/brdc{doy:03d}0.{yy}n.gz",
+                    f"http://igs.bkg.bund.de/root_ftp/IGS/BRDC/{year}/{doy:03d}/BRDC00IGS_R_{year}{doy:03d}0000_01D_MN.rnx.gz"
+                ]
+                
                 descargado = False
                 for url_nav in urls_to_try:
                     try:
-                        yield f"  [-] Intentando espejo: {url_nav.split('/')[-1]}...\n"
-                        with urllib.request.urlopen(urllib.request.Request(url_nav, headers={'User-Agent': 'Mozilla/5.0'}), context=ctx, timeout=5) as res, open(nav_gz, 'wb') as f: f.write(res.read())
-                        descargado = True; yield f"  [+] Descarga exitosa.\n"; break 
-                    except Exception as e: yield f"  [!] Falló ({str(e).replace('<', '[').replace('>', ']')}). Saltando...\n"
+                        protocolo = "HTTP PURO" if url_nav.startswith("http://") else "HTTPS"
+                        yield f"  [-] Intentando espejo ({protocolo}): {url_nav.split('/')[-1]}...\n"
+                        req = urllib.request.Request(url_nav, headers={'User-Agent': 'Mozilla/5.0'})
+                        with urllib.request.urlopen(req, context=ctx, timeout=5) as res:
+                            with open(nav_gz, 'wb') as f: f.write(res.read())
+                        descargado = True
+                        yield f"  [+] Descarga exitosa verificada mediante {protocolo}.\n"
+                        break 
+                    except Exception as e:
+                        err_limpio = str(e).replace('<', '[').replace('>', ']')
+                        yield f"  [!] Falló ({err_limpio}). Saltando a siguiente servidor...\n"
+                        continue
                 
-                if not descargado: raise Exception("HTTP 404/Timeout: Red IGS global bloqueó conexión.")
+                if not descargado:
+                    raise Exception("HTTP 404/Timeout Total: La red IGS global bloqueó la conexión o el archivo no existe.")
+                
                 yield "  [-] Descomprimiendo archivo NAV...\n"
-                with gzip.open(nav_gz, 'rb') as f_in, open(nav_path, 'wb') as f_out: shutil.copyfileobj(f_in, f_out)
+                with gzip.open(nav_gz, 'rb') as f_in, open(nav_path, 'wb') as f_out: 
+                    shutil.copyfileobj(f_in, f_out)
+                
                 if os.path.exists(nav_gz): os.remove(nav_gz)
             
             guardar_estado('nav_path', nav_path)
             guardar_estado('name_nav_file', os.path.basename(nav_path))
             yield f"  [-] Archivo NAV listo y ensamblado en memoria.\n\n[SUCCESS]"
-        except Exception as e: yield f"\n[CAJA_ERROR] Fallo en descarga automática NAV: {str(e)}\n"
+        except Exception as e:
+            yield f"\n> [ERROR FATAL] Fallo en descarga automática NAV: {str(e)}\n"
+
     return Response(procesar(), mimetype='text/plain')
 
 @app.route('/API/tab3_calibrar', methods=['POST'])
 def tab3_calibrar():
-    utm_n, utm_e, utm_c = leer_estado('utm_norte'), leer_estado('utm_este'), leer_estado('utm_cota')
-    utm_h, utm_hem = leer_estado('utm_huso'), leer_estado('utm_hemisferio')
-    utm_n_r, utm_e_r, utm_c_r = leer_estado('utm_norte_r'), leer_estado('utm_este_r'), leer_estado('utm_cota_r')
-    h_b, h_r = leer_estado('altura_base'), leer_estado('altura_rover')
+    utm_n = leer_estado('utm_norte')
+    utm_e = leer_estado('utm_este')
+    utm_c = leer_estado('utm_cota')
+    utm_h = leer_estado('utm_huso')
+    utm_hem = leer_estado('utm_hemisferio')
+    utm_n_r = leer_estado('utm_norte_r')
+    utm_e_r = leer_estado('utm_este_r')
+    utm_c_r = leer_estado('utm_cota_r')
+    h_b = leer_estado('altura_base')
+    h_r = leer_estado('altura_rover')
 
-    p_max_gap, p_snr = safe_f(request.form.get('param_max_gap'), 0.5), safe_f(request.form.get('param_snr'), 25.0)
-    p_iter = max(1, safe_i(request.form.get('param_iter'), 6))
+    p_max_gap = safe_f(request.form.get('param_max_gap'), 0.5)
+    p_snr = safe_f(request.form.get('param_snr'), 25.0)
+    p_iter = safe_i(request.form.get('param_iter'), 6)
+    p_iter = max(1, p_iter) 
 
     def procesar():
-        start_time = time.time()
         try:
-            if 0.0 in [utm_e, utm_n, utm_n_r, utm_e_r]: yield "[CAJA_ERROR] Coordenadas no inyectadas correctamente.\n"; return
+            if utm_e == 0.0 or utm_n == 0.0 or utm_n_r == 0.0 or utm_e_r == 0.0: 
+                yield "> [ERROR] Coordenadas Base y Rover no inyectadas correctamente.\n"; return
             
-            nav_path, sp3_path = leer_estado('nav_path'), leer_estado('sp3_path')
-            p_b_raw, p_r_raw = leer_estado('base_raw'), os.path.join(UPLOAD_FOLDER, 'rover_calibracion_raw.obs')
-            if not nav_path or not p_b_raw or not os.path.exists(p_b_raw): yield "[CAJA_ERROR] Faltan archivos. Ve a la Pestaña 2.\n"; return
+            nav_path = leer_estado('nav_path')
+            sp3_path = leer_estado('sp3_path')
+            p_b_h = leer_estado('base_calib_homo')
+            p_r_h = leer_estado('rover_calib_homo')
 
-            obs_b_full, obs_r_full = parse_rinex_obs_completo(p_b_raw), parse_rinex_obs_completo(p_r_raw)
-            nav, sp3 = parse_rinex_nav_real(nav_path), parse_sp3_preciso(sp3_path) if sp3_path else {}
+            if not nav_path or not p_b_h or not p_r_h: 
+                yield "> [ERROR FATAL] Faltan archivos. Ve a la Pestaña 2.\n"; return
+
+            obs_b_raw = parse_rinex_obs_completo(p_b_h)
+            obs_r_raw = parse_rinex_obs_completo(p_r_h)
+            nav = parse_rinex_nav_real(nav_path)
+            sp3 = parse_sp3_preciso(sp3_path) if sp3_path else {}
             
-            modo_str, ratio, msg = analizar_calidad_y_senales_rinex(obs_b_full, obs_r_full, max_gap_tolerado=p_max_gap)
+            modo_str, ratio, msg = analizar_calidad_y_senales_rinex(obs_b_raw, obs_r_raw, max_gap_tolerado=p_max_gap)
             yield f"> [ENRUTADOR] Análisis completado: {msg}\n"
-            if modo_str == "MODO_C_SPP": yield "\n[CAJA_ERROR] Enrutador detectó MODO C (SPP). Requiere implementación autónoma.\n"; return
+            
+            if modo_str == "MODO_C_SPP":
+                yield "\n> [ERROR] Operación Abortada: El Enrutador detectó MODO C (SPP). Requiere implementación geométrica dedicada.\n"
+                return
             
             lat_b, lon_b, _ = utm_a_geodesicas(utm_e, utm_n, utm_h, utm_hem)
             X_b, Y_b, Z_b = geodesicas_a_ecef(lat_b, lon_b, utm_c + h_b)
             X_bg, Y_bg, Z_bg = geodesicas_a_ecef(lat_b, lon_b, utm_c)
 
-            yield f"> [SISTEMA] Iniciando Búsqueda Determinista | {modo_str} (MÓDULOS AISLADOS V16)...\n"
-            
-            # --- RUTAS DE EJECUCIÓN ABSOLUTAMENTE AISLADAS SEGÚN EL MÓDULO (100% EPOCAS, NO OPTIMIZADO) ---
-            
-            if modo_str == "MODO_A_CODIGO":
-                # ==============================================================
-                # LÓGICA MÓDULO A V16 (Tolerancia Gap dinámica, 100% de la data)
-                # ==============================================================
-                global_best_score, best_rmse, best_params = float('inf'), float('inf'), {}
-                m_center, m_span, cp_center, cp_span, ca_center, ca_span = 10.0, 5.0, 2.0, 1.5, 2.0, 1.5
-                snr_center, snr_span, gap_center, gap_span = p_snr, 5.0, p_max_gap, 0.02
+            if modo_str in ["MODO_A_CODIGO", "MODO_C_PPK"]:
+                yield f"> [SISTEMA] Iniciando Búsqueda Determinista | {modo_str}...\n"
                 
+                if modo_str == "MODO_A_CODIGO":
+                    sd_suavizada = aislar_diferencias_simples_ppk(obs_b_raw, obs_r_raw)
+                else:
+                    sd_suavizada = aislar_diferencias_MODO_C(obs_b_raw, obs_r_raw)
+                    
+                if not sd_suavizada: yield "> [ERROR] No hay épocas sincronizadas válidas.\n"; return
+                t_sample = list(sd_suavizada.keys())
+                
+                yield "[PROGRESO] Fase 1: Extracción de Límites (Pre-Scan EKF)...\n"
                 P_init = matid(3)
                 for i in range(3): P_init[i][i] = 100.0
+                kf_estado_raw = {'X': [[X_bg], [Y_bg], [Z_bg]], 'P': P_init, 'X_base': (X_b, Y_b, Z_b), 'fix_flags': 0, 'h_r': h_r}
+                coords_raw = []
                 
+                for t in t_sample:
+                    if modo_str == "MODO_A_CODIGO":
+                        sem, status, kf_estado_raw, _ = procesar_ekF_lambda(sd_suavizada[t], nav, sp3, kf_estado_raw, t, 10.0, p_snr)
+                    else:
+                        sem, status, kf_estado_raw, _ = procesar_ekF_PPK_L1_L5(sd_suavizada[t], nav, sp3, kf_estado_raw, t, 10.0, p_snr)
+                        
+                    if sem:
+                        la, lo, al = ecef_a_geodesicas(sem[0], sem[1], sem[2])
+                        nt, et = geodesicas_a_utm(la, lo, utm_h)
+                        coords_raw.append((nt, et, al, status))
+                
+                if not coords_raw: yield "> [ERROR] Filtro de Kalman colapsado.\n"; return
+                
+                deltas_h = sorted([math.hypot(c[0] - utm_n_r, c[1] - utm_e_r) for c in coords_raw])
+                deltas_v = sorted([abs(c[2] - utm_c_r) for c in coords_raw])
+                idx_optimo = max(1, len(deltas_h) // 10)
+                best_eh = max(0.01, float(deltas_h[idx_optimo]) * 1.5)
+                best_ev = max(0.01, float(deltas_v[idx_optimo]) * 1.5)
+                
+                yield f"  [*] Límite Horizontal EKF Inyectado: {f_14(best_eh)} m\n"
+                yield f"  [*] Límite Vertical EKF Inyectado: {f_14(best_ev)} m\n\n"
+                
+                yield f"[PROGRESO] Fase 2: Malla Pentadimensional EKF (Iteraciones: {p_iter})...\n"
+                global_best_score = float('inf')
+                best_rmse = float('inf')
+                best_params = {}
+                
+                m_center, m_span = 10.0, 5.0
+                cp_center, cp_span = 2.0, 1.5
+                ca_center, ca_span = 2.0, 1.5
+                snr_center, snr_span = p_snr, 5.0
+                gap_center, gap_span = p_max_gap, 0.02
+                
+                p_b_raw = leer_estado('base_raw')
+                p_r_raw = os.path.join(UPLOAD_FOLDER, 'rover_calibracion_raw.obs')
+                obs_b_full = parse_rinex_obs_completo(p_b_raw) if p_b_raw and os.path.exists(p_b_raw) else obs_b_raw
+                obs_r_full = parse_rinex_obs_completo(p_r_raw) if os.path.exists(p_r_raw) else obs_r_raw
                 rover_tows_full = sorted(list(obs_r_full.keys()))
                 base_tows_full = sorted(list(obs_b_full.keys()))
                 
-                # Pre-scan temporal estático para hallar los límites (usando solo p_max_gap base)
-                obs_b_pre = {}
-                for tr in rover_tows_full:
-                    idx = min(range(len(base_tows_full)), key=lambda i: abs(base_tows_full[i] - tr))
-                    if abs(base_tows_full[idx] - tr) <= p_max_gap:
-                        obs_b_pre[tr] = obs_b_full[base_tows_full[idx]].copy()
-                        obs_b_pre[tr]['_meta'] = obs_r_full[tr]['_meta']
-                
-                sd_pre = aislar_diferencias_simples_ppk(obs_b_pre, obs_r_full)
-                if not sd_pre: yield "[CAJA_ERROR] No hay épocas sincronizadas válidas.\n"; return
-                
-                t_pre = list(sd_pre.keys())
-                
-                coords_pre = []
-                kf_raw = {'X': [[X_bg], [Y_bg], [Z_bg]], 'P': P_init, 'X_base': (X_b, Y_b, Z_b), 'fix_flags': 0, 'h_r': h_r}
-                for t in t_pre:
-                    sem, status, kf_raw, _ = procesar_ekF_lambda(sd_pre[t], nav, sp3, kf_raw, t, 10.0, p_snr)
-                    if sem:
-                        la, lo, al = ecef_a_geodesicas(sem[0], sem[1], sem[2])
-                        coords_pre.append(geodesicas_a_utm(la, lo, utm_h) + (al, status))
-                        
-                if not coords_pre: yield "[CAJA_ERROR] Motor algorítmico EKF colapsado en pre-scan.\n"; return
-                deltas_h, deltas_v = sorted([math.hypot(c[0] - utm_n_r, c[1] - utm_e_r) for c in coords_pre]), sorted([abs(c[2] - utm_c_r) for c in coords_pre])
-                idx_opt = max(1, len(deltas_h) // 10)
-                best_eh, best_ev = max(0.01, float(deltas_h[idx_opt]) * 1.5), max(0.01, float(deltas_v[idx_opt]) * 1.5)
-                
-                yield f"  [*] Límite Horizontal EKF Inyectado: {f_14(best_eh)} m\n  [*] Límite Vertical EKF Inyectado: {f_14(best_ev)} m\n\n"
-                
                 for nivel in range(p_iter):
-                    # ESTE YIELD ES VITAL PARA QUE EL JAVASCRIPT DE V16 CALCULE EL PORCENTAJE
                     yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{p_iter})...\n"
-                    
                     m_grid = [max(1.0, min(25.0, x)) for x in [m_center - m_span, m_center, m_center + m_span]]
                     cp_grid = [max(0.1, min(5.0, x)) for x in [cp_center - cp_span, cp_center, cp_center + cp_span]]
                     ca_grid = [max(0.1, min(5.0, x)) for x in [ca_center - ca_span, ca_center, ca_center + ca_span]]
@@ -1625,35 +1927,45 @@ def tab3_calibrar():
                     nivel_best_params = {}
                     
                     for gap in set(gap_grid):
-                        # Sincronización dentro del bucle
                         obs_b_sync = {}
                         for tr in rover_tows_full:
+                            if not base_tows_full: continue
                             idx = min(range(len(base_tows_full)), key=lambda i: abs(base_tows_full[i] - tr))
                             if abs(base_tows_full[idx] - tr) <= gap:
                                 obs_b_sync[tr] = obs_b_full[base_tows_full[idx]].copy()
                                 obs_b_sync[tr]['_meta'] = obs_r_full[tr]['_meta']
                                 
-                        sd_suav = aislar_diferencias_simples_ppk(obs_b_sync, obs_r_full)
-                        if not sd_suav: continue
-                        
+                        if modo_str == "MODO_A_CODIGO":
+                            sd_suav = aislar_diferencias_simples_ppk(obs_b_sync, obs_r_full)
+                        else:
+                            sd_suav = aislar_diferencias_MODO_C(obs_b_sync, obs_r_full)
+                            
                         t_samp = list(sd_suav.keys())
+                        if not sd_suav: continue
                         
                         for m in set(m_grid):
                             for snr in set(snr_grid):
                                 kf_est = {'X': [[X_bg], [Y_bg], [Z_bg]], 'P': P_init, 'X_base': (X_b, Y_b, Z_b), 'fix_flags': 0, 'h_r': h_r}
                                 coords = []
                                 for t in t_samp:
-                                    sem, status, kf_est, _ = procesar_ekF_lambda(sd_suav[t], nav, sp3, kf_est, t, m, snr)
+                                    if modo_str == "MODO_A_CODIGO":
+                                        sem, status, kf_est, _ = procesar_ekF_lambda(sd_suav[t], nav, sp3, kf_est, t, m, snr)
+                                    else:
+                                        sem, status, kf_est, _ = procesar_ekF_PPK_L1_L5(sd_suav[t], nav, sp3, kf_est, t, m, snr)
+                                        
                                     if sem:
                                         la, lo, al = ecef_a_geodesicas(sem[0], sem[1], sem[2])
-                                        coords.append(geodesicas_a_utm(la, lo, utm_h) + (al, status))
+                                        nt, et = geodesicas_a_utm(la, lo, utm_h)
+                                        coords.append((nt, et, al, status))
                                 
                                 if not coords: continue
+                                
                                 for cp in set(cp_grid):
                                     for ca in set(ca_grid):
                                         res = estadistica_desacoplada(coords, cp, ca, best_eh, best_ev)
                                         if res[0] is None: continue
                                         nf, ef, zf, std_n, std_e, std_z, ret, fix_ratio = res
+                                        
                                         rmse_3d = math.sqrt((nf - utm_n_r)**2 + (ef - utm_e_r)**2 + (zf - utm_c_r)**2)
                                         score = (rmse_3d ** 3) * (1.0 + gap * 0.05) * (1.0 + (1.0 - (fix_ratio/100.0)) * 2.0)
                                         
@@ -1661,7 +1973,8 @@ def tab3_calibrar():
                                             nivel_best_rmse = score
                                             nivel_best_params = {'m': m, 'snr': snr, 'gap': gap, 'cp': cp, 'ca': ca, 'rmse': rmse_3d}
                                             if score < global_best_score:
-                                                global_best_score, best_rmse = score, rmse_3d
+                                                global_best_score = score
+                                                best_rmse = rmse_3d
                                                 best_params = {'mask': m, 'cp': cp, 'ca': ca, 'eh': best_eh, 'ev': best_ev, 'max_gap': gap, 'snr': snr, 'rmse': rmse_3d, 'ret': ret, 'dn': nf - utm_n_r, 'de': ef - utm_e_r, 'dz': zf - utm_c_r}
                     
                     if nivel_best_rmse != float('inf'):
@@ -1675,155 +1988,59 @@ def tab3_calibrar():
                         gap_center, gap_span = best_params['max_gap'], gap_span / 2.0
                     else:
                         m_span /= 2.0; cp_span /= 2.0; ca_span /= 2.0; snr_span /= 2.0; gap_span /= 2.0
-                
-                fecha_med = f"{sd_pre[t_pre[0]]['_meta'][0]}-{sd_pre[t_pre[0]]['_meta'][1]:02d}-{sd_pre[t_pre[0]]['_meta'][2]:02d}"
-
-            elif modo_str == "MODO_C_PPK":
-                # ==============================================================
-                # LÓGICA MÓDULO C (PPK Dual)
-                # ==============================================================
-                global_best_score, best_rmse, best_params = float('inf'), float('inf'), {}
-                m_center, m_span, cp_center, cp_span, ca_center, ca_span = 10.0, 5.0, 2.0, 1.5, 2.0, 1.5
-                snr_center, snr_span, gap_center, gap_span = p_snr, 5.0, p_max_gap, 0.02
-                
-                P_init = matid(3)
-                for i in range(3): P_init[i][i] = 100.0
-                
-                rover_tows_full = sorted(list(obs_r_full.keys()))
-                base_tows_full = sorted(list(obs_b_full.keys()))
-                
-                obs_b_pre = {}
-                for tr in rover_tows_full:
-                    idx = min(range(len(base_tows_full)), key=lambda i: abs(base_tows_full[i] - tr))
-                    if abs(base_tows_full[idx] - tr) <= p_max_gap:
-                        obs_b_pre[tr] = obs_b_full[base_tows_full[idx]].copy()
-                        obs_b_pre[tr]['_meta'] = obs_r_full[tr]['_meta']
-                
-                sd_pre = aislar_diferencias_MODO_C(obs_b_pre, obs_r_full)
-                if not sd_pre: yield "[CAJA_ERROR] No hay épocas sincronizadas válidas.\n"; return
-                
-                t_pre = list(sd_pre.keys())
-                
-                coords_pre = []
-                kf_raw = {'X': [[X_bg], [Y_bg], [Z_bg]], 'P': P_init, 'X_base': (X_b, Y_b, Z_b), 'fix_flags': 0, 'h_r': h_r}
-                for t in t_pre:
-                    sem, status, kf_raw, _ = procesar_ekF_PPK_L1_L5(sd_pre[t], nav, sp3, kf_raw, t, 10.0, p_snr)
-                    if sem:
-                        la, lo, al = ecef_a_geodesicas(sem[0], sem[1], sem[2])
-                        coords_pre.append(geodesicas_a_utm(la, lo, utm_h) + (al, status))
-                        
-                if not coords_pre: yield "[CAJA_ERROR] Motor algorítmico EKF colapsado en pre-scan.\n"; return
-                deltas_h, deltas_v = sorted([math.hypot(c[0] - utm_n_r, c[1] - utm_e_r) for c in coords_pre]), sorted([abs(c[2] - utm_c_r) for c in coords_pre])
-                idx_opt = max(1, len(deltas_h) // 10)
-                best_eh, best_ev = max(0.01, float(deltas_h[idx_opt]) * 1.5), max(0.01, float(deltas_v[idx_opt]) * 1.5)
-                
-                yield f"  [*] Límite Horizontal EKF Inyectado: {f_14(best_eh)} m\n  [*] Límite Vertical EKF Inyectado: {f_14(best_ev)} m\n\n"
-                
-                for nivel in range(p_iter):
-                    yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{p_iter})...\n"
-                    
-                    m_grid = [max(1.0, min(25.0, x)) for x in [m_center - m_span, m_center, m_center + m_span]]
-                    cp_grid = [max(0.1, min(5.0, x)) for x in [cp_center - cp_span, cp_center, cp_center + cp_span]]
-                    ca_grid = [max(0.1, min(5.0, x)) for x in [ca_center - ca_span, ca_center, ca_center + ca_span]]
-                    snr_grid = [max(25.0, min(45.0, x)) for x in [snr_center - snr_span, snr_center, snr_center + snr_span]]
-                    gap_grid = [max(0.01, min(0.05, x)) for x in [gap_center - gap_span, gap_center, gap_center + gap_span]]
-                    
-                    nivel_best_rmse = float('inf')
-                    nivel_best_params = {}
-                    
-                    for gap in set(gap_grid):
-                        obs_b_sync = {}
-                        for tr in rover_tows_full:
-                            idx = min(range(len(base_tows_full)), key=lambda i: abs(base_tows_full[i] - tr))
-                            if abs(base_tows_full[idx] - tr) <= gap:
-                                obs_b_sync[tr] = obs_b_full[base_tows_full[idx]].copy()
-                                obs_b_sync[tr]['_meta'] = obs_r_full[tr]['_meta']
-                                
-                        sd_suav = aislar_diferencias_MODO_C(obs_b_sync, obs_r_full)
-                        if not sd_suav: continue
-                        
-                        t_samp = list(sd_suav.keys())
-                        
-                        for m in set(m_grid):
-                            for snr in set(snr_grid):
-                                kf_est = {'X': [[X_bg], [Y_bg], [Z_bg]], 'P': P_init, 'X_base': (X_b, Y_b, Z_b), 'fix_flags': 0, 'h_r': h_r}
-                                coords = []
-                                for t in t_samp:
-                                    sem, status, kf_est, _ = procesar_ekF_PPK_L1_L5(sd_suav[t], nav, sp3, kf_est, t, m, snr)
-                                    if sem:
-                                        la, lo, al = ecef_a_geodesicas(sem[0], sem[1], sem[2])
-                                        coords.append(geodesicas_a_utm(la, lo, utm_h) + (al, status))
-                                
-                                if not coords: continue
-                                for cp in set(cp_grid):
-                                    for ca in set(ca_grid):
-                                        res = estadistica_desacoplada(coords, cp, ca, best_eh, best_ev)
-                                        if res[0] is None: continue
-                                        nf, ef, zf, std_n, std_e, std_z, ret, fix_ratio = res
-                                        rmse_3d = math.sqrt((nf - utm_n_r)**2 + (ef - utm_e_r)**2 + (zf - utm_c_r)**2)
-                                        score = (rmse_3d ** 3) * (1.0 + gap * 0.05) * (1.0 + (1.0 - (fix_ratio/100.0)) * 2.0)
-                                        
-                                        if score < nivel_best_rmse:
-                                            nivel_best_rmse = score
-                                            nivel_best_params = {'m': m, 'snr': snr, 'gap': gap, 'cp': cp, 'ca': ca, 'rmse': rmse_3d}
-                                            if score < global_best_score:
-                                                global_best_score, best_rmse = score, rmse_3d
-                                                best_params = {'mask': m, 'cp': cp, 'ca': ca, 'eh': best_eh, 'ev': best_ev, 'max_gap': gap, 'snr': snr, 'rmse': rmse_3d, 'ret': ret, 'dn': nf - utm_n_r, 'de': ef - utm_e_r, 'dz': zf - utm_c_r}
-                    
-                    if nivel_best_rmse != float('inf'):
-                        yield f"  [*] Fin Iteración {nivel+1} | Mejor RMSE Local: {f_14(nivel_best_params['rmse'])} m\n"
-                    
-                    if global_best_score != float('inf'):
-                        m_center, m_span = best_params['mask'], m_span / 2.0
-                        cp_center, cp_span = best_params['cp'], cp_span / 2.0
-                        ca_center, ca_span = best_params['ca'], ca_span / 2.0
-                        snr_center, snr_span = best_params['snr'], snr_span / 2.0
-                        gap_center, gap_span = best_params['max_gap'], gap_span / 2.0
-                    else:
-                        m_span /= 2.0; cp_span /= 2.0; ca_span /= 2.0; snr_span /= 2.0; gap_span /= 2.0
-                        
-                fecha_med = f"{sd_pre[t_pre[0]]['_meta'][0]}-{sd_pre[t_pre[0]]['_meta'][1]:02d}-{sd_pre[t_pre[0]]['_meta'][2]:02d}"
 
             else:
-                # ==============================================================
-                # LÓGICA MÓDULO B V16 (Malla Tridimensional, 100% data)
-                # ==============================================================
-                global_best_score, best_rmse, best_params = float('inf'), float('inf'), {}
-                m_center, m_span, cp_center, cp_span, ca_center, ca_span = 10.0, 5.0, 2.0, 1.5, 2.0, 1.5
-                
-                rover_tows_full = sorted(list(obs_r_full.keys()))
-                base_tows_full = sorted(list(obs_b_full.keys()))
-                
+                yield f"> [SISTEMA] Iniciando Búsqueda Determinista | MÓDULO B (IRLS Clásico Termux)...\n"
+                p_b_raw = leer_estado('base_raw')
+                p_r_raw = os.path.join(UPLOAD_FOLDER, 'rover_calibracion_raw.obs')
+                obs_b_full = parse_rinex_obs_completo(p_b_raw) if p_b_raw and os.path.exists(p_b_raw) else obs_b_raw
+                obs_r_full = parse_rinex_obs_completo(p_r_raw) if os.path.exists(p_r_raw) else obs_r_raw
+
+                rover_tows = sorted(list(obs_r_full.keys()))
+                base_tows = sorted(list(obs_b_full.keys()))
                 obs_b_sync = {}
-                for tr in rover_tows_full:
-                    idx = min(range(len(base_tows_full)), key=lambda i: abs(base_tows_full[i] - tr))
-                    if abs(base_tows_full[idx] - tr) <= p_max_gap:
-                        obs_b_sync[tr] = obs_b_full[base_tows_full[idx]].copy()
+                for tr in rover_tows:
+                    if not base_tows: continue
+                    idx = min(range(len(base_tows)), key=lambda i: abs(base_tows[i] - tr))
+                    if abs(base_tows[idx] - tr) <= p_max_gap:
+                        obs_b_sync[tr] = obs_b_full[base_tows[idx]].copy()
                         obs_b_sync[tr]['_meta'] = obs_r_full[tr]['_meta']
 
                 sd_suavizada = aislar_diferencias_MODO_B(obs_b_sync, obs_r_full)
-                if not sd_suavizada: yield "[CAJA_ERROR] No hay épocas sincronizadas válidas.\n"; return
-                
+                if not sd_suavizada: yield "> [ERROR] No hay épocas sincronizadas válidas.\n"; return
                 t_sample = list(sd_suavizada.keys())
                 
+                yield "[PROGRESO] Fase 1: Extracción de Límites (Pre-Scan Clásico IRLS)...\n"
                 coords_raw = []
                 for t in t_sample:
-                    sem, status = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, 10.0)
+                    sem, status = calcular_IRLS_MODO_B(sd_suavizada[t], nav, X_b, Y_b, Z_b, t, 10.0)
                     if sem:
                         la, lo, al = ecef_a_geodesicas(sem[0], sem[1], sem[2])
-                        coords_raw.append(geodesicas_a_utm(la, lo, utm_h) + (al, status))
+                        nt, et = geodesicas_a_utm(la, lo, utm_h)
+                        coords_raw.append((nt, et, al, status))
                 
-                if not coords_raw: yield "[CAJA_ERROR] Nube de puntos bruta colapsada.\n"; return
+                if not coords_raw: yield "> [ERROR] Nube de puntos bruta colapsada.\n"; return
                 
-                deltas_h, deltas_v = sorted([math.hypot(c[0] - utm_n_r, c[1] - utm_e_r) for c in coords_raw]), sorted([abs(c[2] - utm_c_r) for c in coords_raw])
-                idx_opt = max(1, len(deltas_h) // 10)
-                best_eh, best_ev = max(0.01, float(deltas_h[idx_opt]) * 1.5), max(0.01, float(deltas_v[idx_opt]) * 1.5)
+                deltas_h = sorted([math.hypot(c[0] - utm_n_r, c[1] - utm_e_r) for c in coords_raw])
+                deltas_v = sorted([abs(c[2] - utm_c_r) for c in coords_raw])
+                idx_optimo = max(1, len(deltas_h) // 10)
+                best_eh = max(0.01, float(deltas_h[idx_optimo]) * 1.5)
+                best_ev = max(0.01, float(deltas_v[idx_optimo]) * 1.5)
                 
-                yield f"  [*] Límite Horizontal IRLS Inyectado: {f_14(best_eh)} m\n  [*] Límite Vertical IRLS Inyectado: {f_14(best_ev)} m\n\n"
+                yield f"  [*] Límite Horizontal IRLS Inyectado: {f_14(best_eh)} m\n"
+                yield f"  [*] Límite Vertical IRLS Inyectado: {f_14(best_ev)} m\n\n"
+                
+                yield f"[PROGRESO] Fase 2: Malla Tridimensional Clásica (Iteraciones: {p_iter})...\n"
+                global_best_score = float('inf')
+                best_rmse = float('inf')
+                best_params = {}
+                
+                m_center, m_span = 10.0, 5.0
+                cp_center, cp_span = 2.0, 1.5
+                ca_center, ca_span = 2.0, 1.5
                 
                 for nivel in range(p_iter):
                     yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{p_iter})...\n"
-                    
                     m_grid = [max(5.0, min(15.0, x)) for x in [m_center - m_span, m_center, m_center + m_span]]
                     cp_grid = [max(0.1, min(5.0, x)) for x in [cp_center - cp_span, cp_center, cp_center + cp_span]]
                     ca_grid = [max(0.1, min(5.0, x)) for x in [ca_center - ca_span, ca_center, ca_center + ca_span]]
@@ -1834,12 +2051,14 @@ def tab3_calibrar():
                     for m in set(m_grid):
                         coords = []
                         for t in t_sample:
-                            sem, status = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, m)
+                            sem, status = calcular_IRLS_MODO_B(sd_suavizada[t], nav, X_b, Y_b, Z_b, t, m)
                             if sem:
                                 la, lo, al = ecef_a_geodesicas(sem[0], sem[1], sem[2])
-                                coords.append(geodesicas_a_utm(la, lo, utm_h) + (al, status))
+                                nt, et = geodesicas_a_utm(la, lo, utm_h)
+                                coords.append((nt, et, al, status))
                         
                         if not coords: continue
+                        
                         for cp in set(cp_grid):
                             for ca in set(ca_grid):
                                 res = estadistica_desacoplada(coords, cp, ca, best_eh, best_ev)
@@ -1851,39 +2070,47 @@ def tab3_calibrar():
                                     nivel_best_rmse = rmse_3d
                                     nivel_best_params = {'m': m, 'cp': cp, 'ca': ca, 'rmse': rmse_3d}
                                     if rmse_3d < global_best_score:
-                                        global_best_score, best_rmse = rmse_3d, rmse_3d
+                                        global_best_score = rmse_3d
+                                        best_rmse = rmse_3d
                                         best_params = {'mask': m, 'cp': cp, 'ca': ca, 'eh': best_eh, 'ev': best_ev, 'max_gap': p_max_gap, 'snr': p_snr, 'rmse': rmse_3d, 'ret': ret, 'dn': nf - utm_n_r, 'de': ef - utm_e_r, 'dz': zf - utm_c_r}
                     
                     if nivel_best_rmse != float('inf'):
                         yield f"  [*] Fin Iteración {nivel+1} | Mejor RMSE Local: {f_14(nivel_best_params['rmse'])} m\n"
-                    
+                        
                     if global_best_score != float('inf'):
                         m_center, m_span = best_params['mask'], m_span / 2.0
                         cp_center, cp_span = best_params['cp'], cp_span / 2.0
                         ca_center, ca_span = best_params['ca'], ca_span / 2.0
                     else:
                         m_span /= 2.0; cp_span /= 2.0; ca_span /= 2.0
-                        
-                fecha_med = f"{sd_suavizada[t_sample[0]]['_meta'][0]}-{sd_suavizada[t_sample[0]]['_meta'][1]:02d}-{sd_suavizada[t_sample[0]]['_meta'][2]:02d}"
-
             
-            # --- GUARDADO FINAL COMÚN ---
             if best_rmse != float('inf'):
-                for k, v in [('opt_mask', best_params['mask']), ('opt_cp', best_params['cp']), ('opt_ca', best_params['ca']), ('opt_max_gap', best_params.get('max_gap', p_max_gap)), ('opt_snr', best_params.get('snr', p_snr)), ('opt_eh', best_params['eh']), ('opt_ev', best_params['ev']), ('opt_bias_n', best_params['dn']), ('opt_bias_e', best_params['de']), ('opt_bias_z', best_params['dz']), ('estrategia_activa', modo_str)]: guardar_estado(k, v)
+                guardar_estado('opt_mask', best_params['mask'])
+                guardar_estado('opt_cp', best_params['cp'])
+                guardar_estado('opt_ca', best_params['ca'])
+                guardar_estado('opt_max_gap', best_params.get('max_gap', p_max_gap))
+                guardar_estado('opt_snr', best_params.get('snr', p_snr))
+                guardar_estado('opt_eh', best_params['eh'])
+                guardar_estado('opt_ev', best_params['ev'])
+                
+                guardar_estado('opt_bias_n', best_params['dn'])
+                guardar_estado('opt_bias_e', best_params['de'])
+                guardar_estado('opt_bias_z', best_params['dz'])
+                
+                guardar_estado('estrategia_activa', modo_str)
                 
                 fecha_calculo = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                elapsed = time.time() - start_time
 
                 yield "\n========================================================\n"
                 yield f"      [INFORME] PARÁMETROS ÓPTIMOS ({modo_str})\n"
                 yield "========================================================\n"
-                yield f"  [-] Fecha de Medición Inicial: {fecha_med}\n"
                 yield f"  [-] Fecha y Hora de Cálculo: {fecha_calculo}\n"
-                yield f"  [-] Tiempo de Procesamiento Calibración: {f_14(elapsed)} s\n"
                 yield f"  [-] Coord. Base Fija (N,E,Z): {f_14(utm_n)}, {f_14(utm_e)}, {f_14(utm_c)}\n"
                 yield f"  [-] Coord. Rover Cal (N,E,Z): {f_14(utm_n_r)}, {f_14(utm_e_r)}, {f_14(utm_c_r)}\n"
                 yield "--------------------------------------------------------\n"
-                if modo_str in ["MODO_A_CODIGO", "MODO_C_PPK"]: yield f"  [-] Máscara SNR (dBHz): {f_14(best_params.get('snr', p_snr))}\n"
+                yield f"  [-] Tolerancia Sync (max_gap): {f_14(best_params.get('max_gap', p_max_gap))}\n"
+                if modo_str in ["MODO_A_CODIGO", "MODO_C_PPK"]: 
+                    yield f"  [-] Máscara SNR (dBHz): {f_14(best_params.get('snr', p_snr))}\n"
                 yield f"  [-] Máscara Elevación (°): {f_14(best_params['mask'])}\n"
                 yield f"  [-] Filtro Sigma Plan (cp): {f_14(best_params['cp'])}\n"
                 yield f"  [-] Filtro Sigma Alt (ca): {f_14(best_params['ca'])}\n"
@@ -1892,27 +2119,40 @@ def tab3_calibrar():
                 yield "--------------------------------------------------------\n"
                 yield f"  [*] Menor Distancia 3D al Punto: {f_14(best_params['rmse'])} m\n"
                 yield f"  [*] Deltas Residuales -> N: {f_14(best_params['dn'])}m, E: {f_14(best_params['de'])}m, Z: {f_14(best_params['dz'])}m\n"
-                yield f"  [*] Épocas Retenidas (Del Muestreo): {best_params['ret']}\n"
-                yield "========================================================\n\n[SUCCESS]"
+                yield f"  [*] Épocas Retenidas: {best_params['ret']}\n"
+                yield "========================================================\n"
+                yield "\n[SUCCESS]"
             else:
-                yield "\n[CAJA_ERROR] Se agotaron los recursos de cálculo de Range. El modelo no convergió.\n"
-        except Exception as e: yield f"\n[CAJA_ERROR] {str(e)}"
+                yield "\n> [ERROR] El modelo no convergió. Filtros demasiado agresivos.\n"
+        except Exception as e: yield f"\n> [ERROR FATAL] {str(e)}"
     return Response(procesar(), mimetype='text/plain')
 
 @app.route('/API/tab4_procesar', methods=['POST'])
 def tab4_procesar():
-    utm_n, utm_e, utm_c = leer_estado('utm_norte'), leer_estado('utm_este'), leer_estado('utm_cota')
-    utm_h, utm_hem = leer_estado('utm_huso'), leer_estado('utm_hemisferio')
-    h_b, h_r = leer_estado('altura_base'), leer_estado('altura_rover')
+    utm_n = leer_estado('utm_norte')
+    utm_e = leer_estado('utm_este')
+    utm_c = leer_estado('utm_cota')
+    utm_h = leer_estado('utm_huso')
+    utm_hem = leer_estado('utm_hemisferio')
+    h_b = leer_estado('altura_base')
+    h_r = leer_estado('altura_rover')
     
-    p_mask, p_cp, p_ca = leer_estado('opt_mask'), leer_estado('opt_cp'), leer_estado('opt_ca')
-    err_hor_max, err_ver_max = leer_estado('opt_eh'), leer_estado('opt_ev')
-    p_max_gap, p_snr = leer_estado('opt_max_gap'), leer_estado('opt_snr')
+    p_mask = leer_estado('opt_mask')
+    p_cp = leer_estado('opt_cp')
+    p_ca = leer_estado('opt_ca')
+    err_hor_max = leer_estado('opt_eh')
+    err_ver_max = leer_estado('opt_ev')
+    p_max_gap = leer_estado('opt_max_gap')
+    p_snr = leer_estado('opt_snr')
     estrategia = leer_estado('estrategia_activa')
+
     url_rover_nuevo = request.form.get('url_rover_nuevo')
     
-    if p_mask is None or utm_n is None: return Response("[CAJA_ERROR] Parámetros o coordenadas no encontrados. Ejecute la Pestaña 3 primero.\n", mimetype='text/plain')
-    if not url_rover_nuevo or url_rover_nuevo.strip() == '': return Response("[CAJA_ERROR] Falta el enlace de Drive del nuevo archivo RINEX Rover.\n", mimetype='text/plain')
+    if p_mask is None or utm_n is None:
+        return Response("> [ERROR FATAL] Parámetros o coordenadas no encontrados. Ejecute la Pestaña 3 primero.\n", mimetype='text/plain')
+
+    if not url_rover_nuevo or url_rover_nuevo.strip() == '': 
+        return Response("> [ERROR] Falta el enlace de Drive del nuevo archivo RINEX Rover.\n", mimetype='text/plain')
 
     p_r_nuevo = os.path.join(UPLOAD_FOLDER, 'rover_nuevo_raw.obs')
 
@@ -1922,89 +2162,73 @@ def tab4_procesar():
             descargar_desde_gdrive(url_rover_nuevo, p_r_nuevo)
             rf_nuevo_filename = "Drive_Nuevo_Rover.obs"
             
-            nav_path, sp3_path, p_b_raw = leer_estado('nav_path'), leer_estado('sp3_path'), leer_estado('base_raw') 
-            if not nav_path or not p_b_raw or not os.path.exists(p_b_raw): yield "[CAJA_ERROR] Falta archivo RINEX Base original o Efemérides.\n"; return
+            nav_path = leer_estado('nav_path')
+            sp3_path = leer_estado('sp3_path')
+            p_b_raw = leer_estado('base_raw') 
 
-            obs_b_raw, obs_r_raw = parse_rinex_obs_completo(p_b_raw), parse_rinex_obs_completo(p_r_nuevo) 
-            nav, sp3 = parse_rinex_nav_real(nav_path), parse_sp3_preciso(sp3_path) if sp3_path else {}
+            if not nav_path or not p_b_raw or not os.path.exists(p_b_raw): 
+                yield "> [ERROR FATAL] Falta archivo RINEX Base original o Efemérides.\n"; return
+
+            obs_b_raw = parse_rinex_obs_completo(p_b_raw)
+            obs_r_raw = parse_rinex_obs_completo(p_r_nuevo) 
+            nav = parse_rinex_nav_real(nav_path)
+            sp3 = parse_sp3_preciso(sp3_path) if sp3_path else {}
             
             modo_str, ratio, msg = analizar_calidad_y_senales_rinex(obs_b_raw, obs_r_raw, max_gap_tolerado=p_max_gap)
             yield f"> [ENRUTADOR] Análisis completado: {msg}\n"
-            if modo_str == "MODO_C_SPP": yield "\n[CAJA_ERROR] Enrutador detectó MODO C (SPP). Operación Abortada.\n"; return
+            
+            if modo_str == "MODO_C_SPP":
+                yield "\n> [ERROR] Operación Abortada: El Enrutador detectó MODO C (SPP). Requiere implementación geométrica dedicada.\n"
+                return
             
             lat_b, lon_b, _ = utm_a_geodesicas(utm_e, utm_n, utm_h, utm_hem)
             X_b, Y_b, Z_b = geodesicas_a_ecef(lat_b, lon_b, utm_c + h_b)
             X_bg, Y_bg, Z_bg = geodesicas_a_ecef(lat_b, lon_b, utm_c)
 
-            yield f"\n> [SISTEMA] Iniciando Procesamiento DGPS | {modo_str}...\n"
-            if sp3: yield "[PROGRESO] Órbitas Precisas SP3 acopladas con éxito...\n"
-
-            # --- EJECUCIÓN TOTALMENTE AISLADA POR MÓDULOS ---
-            if modo_str == "MODO_A_CODIGO":
-                rover_tows, base_tows = sorted(list(obs_r_raw.keys())), sorted(list(obs_b_raw.keys()))
+            if modo_str in ["MODO_A_CODIGO", "MODO_C_PPK"]:
+                yield f"\n> [SISTEMA] Iniciando Procesamiento DGPS | {modo_str}...\n"
+                if sp3: yield "[PROGRESO] Órbitas Precisas SP3 acopladas con éxito...\n"
+                
+                rover_tows = sorted(list(obs_r_raw.keys()))
+                base_tows = sorted(list(obs_b_raw.keys()))
                 obs_b_sync = {}
                 for tr in rover_tows:
+                    if not base_tows: continue
                     idx = min(range(len(base_tows)), key=lambda i: abs(base_tows[i] - tr))
                     if abs(base_tows[idx] - tr) <= p_max_gap:
                         obs_b_sync[tr] = obs_b_raw[base_tows[idx]].copy()
                         obs_b_sync[tr]['_meta'] = obs_r_raw[tr]['_meta']
-                        
+                
                 yield "[PROGRESO] Extrayendo Observables PPK...\n"
-                sd_suavizada = aislar_diferencias_simples_ppk(obs_b_sync, obs_r_raw)
-                if not sd_suavizada: yield "\n[CAJA_ERROR] No hay épocas sincronizadas válidas.\n"; return
+                if modo_str == "MODO_A_CODIGO":
+                    sd_suavizada = aislar_diferencias_simples_ppk(obs_b_sync, obs_r_raw)
+                else:
+                    sd_suavizada = aislar_diferencias_MODO_C(obs_b_sync, obs_r_raw)
+                    
+                if not sd_suavizada: yield "\n> [ERROR] No hay épocas sincronizadas válidas.\n"; return
                 
                 yield "[PROGRESO] Fase 1: Pasada Forward EKF + Mareas Sólidas...\n"
                 P_init = matid(3)
                 for i in range(3): P_init[i][i] = 100.0
                 kf_est = {'X': [[X_bg], [Y_bg], [Z_bg]], 'P': P_init, 'X_base': (X_b, Y_b, Z_b), 'fix_flags': 0, 'h_r': h_r}
                 fwd_states = []
-                t_eps = len(sd_suavizada)
+                t_eps = len(sd_suavizada); c = 0
                 
-                for c, t in enumerate(sd_suavizada, 1):
-                    if t_eps > 0 and c % max(1, t_eps // 10) == 0: yield f"[PROGRESO] Propagando Matriz Covarianza... {int((c / t_eps) * 100)}%\n"
-                    sem, status, kf_est, st_dict = procesar_ekF_lambda(sd_suavizada[t], nav, sp3, kf_est, t, p_mask, p_snr)
-                    if sem and st_dict:
-                        st_dict['status'] = status; fwd_states.append(st_dict)
-
-                if not fwd_states: yield "\n[CAJA_ERROR] Colapso total del Filtro Kalman.\n"; return
-                
-                yield "[PROGRESO] Fase 2: Aplicando Suavizador RTS Bidireccional...\n"
-                sm_states = suavizador_rts_backward(fwd_states)
-                
-                coords = []
-                for i in range(len(sm_states)):
-                    dx_t, dy_t, dz_t = fwd_states[i]['tide']
-                    x_crustal, y_crustal, z_crustal = sm_states[i][0][0] - dx_t, sm_states[i][1][0] - dy_t, sm_states[i][2][0] - dz_t
-                    la, lo, al = ecef_a_geodesicas(x_crustal, y_crustal, z_crustal)
-                    coords.append(geodesicas_a_utm(la, lo, utm_h) + (al, fwd_states[i]['status']))
-
-            elif modo_str == "MODO_C_PPK":
-                rover_tows, base_tows = sorted(list(obs_r_raw.keys())), sorted(list(obs_b_raw.keys()))
-                obs_b_sync = {}
-                for tr in rover_tows:
-                    idx = min(range(len(base_tows)), key=lambda i: abs(base_tows[i] - tr))
-                    if abs(base_tows[idx] - tr) <= p_max_gap:
-                        obs_b_sync[tr] = obs_b_raw[base_tows[idx]].copy()
-                        obs_b_sync[tr]['_meta'] = obs_r_raw[tr]['_meta']
+                for t in sd_suavizada:
+                    c += 1
+                    if t_eps > 0 and c % max(1, t_eps // 10) == 0: 
+                        yield f"[PROGRESO] Propagando Matriz Covarianza... {int((c / t_eps) * 100)}%\n"
                         
-                yield "[PROGRESO] Extrayendo Observables PPK DUALES...\n"
-                sd_suavizada = aislar_diferencias_MODO_C(obs_b_sync, obs_r_raw)
-                if not sd_suavizada: yield "\n[CAJA_ERROR] No hay épocas sincronizadas válidas.\n"; return
-                
-                yield "[PROGRESO] Fase 1: Pasada Forward EKF + Mareas Sólidas...\n"
-                P_init = matid(3)
-                for i in range(3): P_init[i][i] = 100.0
-                kf_est = {'X': [[X_bg], [Y_bg], [Z_bg]], 'P': P_init, 'X_base': (X_b, Y_b, Z_b), 'fix_flags': 0, 'h_r': h_r}
-                fwd_states = []
-                t_eps = len(sd_suavizada)
-                
-                for c, t in enumerate(sd_suavizada, 1):
-                    if t_eps > 0 and c % max(1, t_eps // 10) == 0: yield f"[PROGRESO] Propagando Matriz Covarianza... {int((c / t_eps) * 100)}%\n"
-                    sem, status, kf_est, st_dict = procesar_ekF_PPK_L1_L5(sd_suavizada[t], nav, sp3, kf_est, t, p_mask, p_snr)
+                    if modo_str == "MODO_A_CODIGO":
+                        sem, status, kf_est, st_dict = procesar_ekF_lambda(sd_suavizada[t], nav, sp3, kf_est, t, p_mask, p_snr)
+                    else:
+                        sem, status, kf_est, st_dict = procesar_ekF_PPK_L1_L5(sd_suavizada[t], nav, sp3, kf_est, t, p_mask, p_snr)
+                        
                     if sem and st_dict:
-                        st_dict['status'] = status; fwd_states.append(st_dict)
+                        st_dict['status'] = status
+                        fwd_states.append(st_dict)
 
-                if not fwd_states: yield "\n[CAJA_ERROR] Colapso total del Filtro Kalman.\n"; return
+                if not fwd_states: yield "\n> [ERROR] Colapso total del Filtro Kalman.\n"; return
                 
                 yield "[PROGRESO] Fase 2: Aplicando Suavizador RTS Bidireccional...\n"
                 sm_states = suavizador_rts_backward(fwd_states)
@@ -2012,63 +2236,550 @@ def tab4_procesar():
                 coords = []
                 for i in range(len(sm_states)):
                     dx_t, dy_t, dz_t = fwd_states[i]['tide']
-                    x_crustal, y_crustal, z_crustal = sm_states[i][0][0] - dx_t, sm_states[i][1][0] - dy_t, sm_states[i][2][0] - dz_t
+                    x_crustal = sm_states[i][0][0] - dx_t
+                    y_crustal = sm_states[i][1][0] - dy_t
+                    z_crustal = sm_states[i][2][0] - dz_t
                     la, lo, al = ecef_a_geodesicas(x_crustal, y_crustal, z_crustal)
-                    coords.append(geodesicas_a_utm(la, lo, utm_h) + (al, fwd_states[i]['status']))
+                    nt, et = geodesicas_a_utm(la, lo, utm_h)
+                    coords.append((nt, et, al, fwd_states[i]['status']))
 
             else:
-                rover_tows, base_tows = sorted(list(obs_r_raw.keys())), sorted(list(obs_b_raw.keys()))
+                yield f"\n> [SISTEMA] Iniciando Procesamiento DGPS | MÓDULO B (IRLS Clásico Termux)...\n"
+                yield "[PROGRESO] Extrayendo Observables Asincrónicas...\n"
+                
+                rover_tows = sorted(list(obs_r_raw.keys()))
+                base_tows = sorted(list(obs_b_raw.keys()))
                 obs_b_sync = {}
                 for tr in rover_tows:
+                    if not base_tows: continue
                     idx = min(range(len(base_tows)), key=lambda i: abs(base_tows[i] - tr))
                     if abs(base_tows[idx] - tr) <= p_max_gap:
                         obs_b_sync[tr] = obs_b_raw[base_tows[idx]].copy()
                         obs_b_sync[tr]['_meta'] = obs_r_raw[tr]['_meta']
-                        
-                yield "[PROGRESO] Extrayendo Observables Asincrónicas...\n"
+
                 sd_suavizada = aislar_diferencias_MODO_B(obs_b_sync, obs_r_raw)
-                if not sd_suavizada: yield "\n[CAJA_ERROR] No hay épocas sincronizadas válidas.\n"; return
+                if not sd_suavizada: yield "\n> [ERROR] No hay épocas sincronizadas válidas.\n"; return
                 
                 coords = []
-                t_eps = len(sd_suavizada)
-                for c, t in enumerate(sd_suavizada, 1):
+                t_eps = len(sd_suavizada); c = 0
+                for t in sd_suavizada:
+                    c += 1
                     if c % max(1, t_eps // 10) == 0: yield f"[PROGRESO] Resolviendo Matrices IRLS DGPS... {int((c / t_eps) * 100)}%\n"
-                    sem, status = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, p_mask)
+                    
+                    sem, status = calcular_IRLS_MODO_B(sd_suavizada[t], nav, X_b, Y_b, Z_b, t, p_mask)
                     if sem:
                         la, lo, al = ecef_a_geodesicas(sem[0], sem[1], sem[2])
-                        coords.append(geodesicas_a_utm(la, lo, utm_h) + (al, status))
+                        nt, et = geodesicas_a_utm(la, lo, utm_h)
+                        coords.append((nt, et, al, status))
                         
-                if not coords: yield "\n[CAJA_ERROR] Fracaso algorítmico total en Inversión NxN.\n"; return
+                if not coords: yield "\n> [ERROR] Fracaso algorítmico total en Inversión NxN.\n"; return
 
             res_estadistica = estadistica_desacoplada(coords, p_cp, p_ca, err_hor_max, err_ver_max)
-            if res_estadistica[0] is None: yield "\n[CAJA_ERROR] Operación Abortada: El 100% de las épocas superan el Error Máximo configurado.\n"; return
+            if res_estadistica[0] is None:
+                yield "\n> [ERROR] Operación Abortada: El 100% de las épocas superan el Error Máximo configurado.\n"; return
                 
             nf, ef, zf, std_n, std_e, std_z, ret, fix_ratio = res_estadistica
-            bias_n, bias_e, bias_z = leer_estado('opt_bias_n') or 0.0, leer_estado('opt_bias_e') or 0.0, leer_estado('opt_bias_z') or 0.0
+            
+            bias_n = leer_estado('opt_bias_n') or 0.0
+            bias_e = leer_estado('opt_bias_e') or 0.0
+            bias_z = leer_estado('opt_bias_z') or 0.0
             
             if modo_str in ["MODO_B_ASINCRONO", "MODO_B_FASE"]:
-                nf_final, ef_final, zf_final_ground = nf - bias_n, ef - bias_e, zf - bias_z 
+                nf_final = nf - bias_n
+                ef_final = ef - bias_e
+                zf_final_ground = zf - bias_z 
                 shift_applied = True
             else:
-                nf_final, ef_final, zf_final_ground = nf, ef, zf - h_r     
+                nf_final = nf
+                ef_final = ef
+                zf_final_ground = zf - h_r     
                 shift_applied = False
             
             p_dict = {
-                'mask': p_mask, 'cp': p_cp, 'ca': p_ca, 'max_gap': p_max_gap, 'snr': p_snr if modo_str in ["MODO_A_CODIGO", "MODO_C_PPK"] else 0.0,
-                'err_h': err_hor_max, 'err_v': err_ver_max, 'nf': nf_final, 'ef': ef_final, 'zf': zf_final_ground, 
+                'mask': p_mask, 'cp': p_cp, 'ca': p_ca,
+                'max_gap': p_max_gap, 'snr': p_snr if modo_str in ["MODO_A_CODIGO", "MODO_C_PPK"] else 0.0,
+                'err_h': err_hor_max, 'err_v': err_ver_max,
+                'nf': nf_final, 'ef': ef_final, 'zf': zf_final_ground, 
                 'ret': ret, 'total': len(coords), 'std_n': std_n, 'std_e': std_e, 'std_z': std_z,
-                'ez': std_z, 'fix_r': fix_ratio, 'base_file': leer_estado('name_base_raw') or "Drive_Base.obs",
-                'rover_file': rf_nuevo_filename, 'nav_file': leer_estado('name_nav_file') or "auto_nav.nav",
+                'ez': std_z, 'fix_r': fix_ratio,
+                'base_file': leer_estado('name_base_raw') or "Drive_Base.obs",
+                'rover_file': rf_nuevo_filename,
+                'nav_file': leer_estado('name_nav_file') or "auto_nav.nav",
                 'sp3_file': leer_estado('name_sp3_file') if modo_str in ["MODO_A_CODIGO", "MODO_C_PPK"] else None,
-                'b_n': utm_n, 'b_e': utm_e, 'b_z': utm_c, 'r_n_calc': nf_final, 'r_e_calc': ef_final, 'r_z_calc': zf_final_ground,
-                'estrategia': estrategia, 'shift_applied': shift_applied, 'bias_n': bias_n, 'bias_e': bias_e, 'bias_z': bias_z
+                'b_n': utm_n, 'b_e': utm_e, 'b_z': utm_c,
+                'r_n_calc': nf_final, 'r_e_calc': ef_final, 'r_z_calc': zf_final_ground,
+                'estrategia': estrategia,
+                'shift_applied': shift_applied,
+                'bias_n': bias_n, 'bias_e': bias_e, 'bias_z': bias_z
             }
             
             yield "[PROGRESO] Ajuste Finalizado.\n"
             yield generar_informe_ascii("MEDICION", p_dict)
             yield "\n[SUCCESS]"
-        except Exception as e: yield f"\n[CAJA_ERROR] {str(e)}"
+        except Exception as e: yield f"\n> [ERROR FATAL] {str(e)}"
     return Response(procesar(), mimetype='text/plain')
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=6000, debug=True)
+    app.run(host='0.0.0.0', port=6000, debug=True)                    Cerrar Sesión
+                </button>
+            </div>
+        </header>
+
+        <nav class="flex space-x-2 bg-gray-800 p-2 rounded mb-6" id="tabs-nav">
+            <button onclick="switchTab(1)" id="btn-tab1" class="px-4 py-2 rounded bg-blue-600 font-bold text-sm sm:text-base">1. Datos y Coordenadas</button>
+            <button onclick="switchTab(2)" id="btn-tab2" class="px-4 py-2 rounded bg-gray-700 disabled-tab text-sm sm:text-base">2. Inyección Orbital</button>
+            <button onclick="switchTab(3)" id="btn-tab3" class="px-4 py-2 rounded bg-gray-700 disabled-tab text-sm sm:text-base">3. Calibración Autónoma</button>
+            <button onclick="switchTab(4)" id="btn-tab4" class="px-4 py-2 rounded bg-gray-700 disabled-tab text-sm sm:text-base">4. Procesar Punto</button>
+        </nav>
+
+        <section id="tab1" class="tab-content active bg-gray-800 p-6 rounded shadow-lg">
+            <h2 class="text-xl mb-4 font-semibold border-b border-gray-600 pb-2">Entrada Maestra del Proyecto</h2>
+            <p class="text-sm text-gray-400 mb-4">Ingrese aquí todos los parámetros físicos del levantamiento. Esta información será inyectada permanentemente en la Caja Negra.</p>
+            <form id="form-tab1" onsubmit="submitForm(event, '/API/tab1_homogenizar', 'console1', 2)">
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                    <div>
+                        <label class="block text-sm mb-1 text-blue-300 font-bold">Enlace Drive - Base Pivote (.obs):</label>
+                        <input type="text" name="url_base" required placeholder="https://drive.google.com/file/d/..." class="w-full bg-gray-700 p-2 rounded border border-blue-500 text-sm text-white focus:outline-none focus:border-blue-400">
+                    </div>
+                    <div>
+                        <label class="block text-sm mb-1 text-green-300 font-bold">Enlace Drive - Rover Calibración (.obs):</label>
+                        <input type="text" name="url_rover" required placeholder="https://drive.google.com/file/d/..." class="w-full bg-gray-700 p-2 rounded border border-green-500 text-sm text-white focus:outline-none focus:border-green-400">
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4 border-t border-gray-700 pt-4">
+                    <div class="sm:col-span-3"><h3 class="text-purple-400 font-bold text-sm">COORDENADAS ABSOLUTAS BASE (ESTACIÓN FIJA)</h3></div>
+                    <div><label class="block text-xs">Norte (Y):</label><input type="number" step="any" name="utm_norte" required class="w-full bg-gray-700 p-2 text-sm rounded border border-gray-600"></div>
+                    <div><label class="block text-xs">Este (X):</label><input type="number" step="any" name="utm_este" required class="w-full bg-gray-700 p-2 text-sm rounded border border-gray-600"></div>
+                    <div><label class="block text-xs">Cota Elipsoidal (Z):</label><input type="number" step="any" name="utm_cota" required class="w-full bg-gray-700 p-2 text-sm rounded border border-gray-600"></div>
+                    <div><label class="block text-xs">Huso UTM:</label><input type="number" name="utm_huso" value="19" required class="w-full bg-gray-700 p-2 text-sm rounded border border-gray-600"></div>
+                    <div><label class="block text-xs">Hemisferio:</label>
+                        <select name="utm_hemisferio" class="w-full bg-gray-700 p-2 text-sm rounded border border-gray-600">
+                            <option value="N">Norte (N)</option>
+                            <option value="S">Sur (S)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4 border-t border-gray-700 pt-4">
+                    <div class="sm:col-span-3"><h3 class="text-green-400 font-bold text-sm">COORDENADAS VERDADERAS ROVER (PUNTO DE CONTROL)</h3></div>
+                    <div><label class="block text-xs">Norte Rover (Y):</label><input type="number" step="any" name="utm_norte_r" required class="w-full bg-gray-700 p-2 text-sm rounded border border-green-500"></div>
+                    <div><label class="block text-xs">Este Rover (X):</label><input type="number" step="any" name="utm_este_r" required class="w-full bg-gray-700 p-2 text-sm rounded border border-green-500"></div>
+                    <div><label class="block text-xs">Cota Rover (Z):</label><input type="number" step="any" name="utm_cota_r" required class="w-full bg-gray-700 p-2 text-sm rounded border border-green-500"></div>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4 border-t border-gray-700 pt-4 pb-2">
+                    <div class="sm:col-span-2"><h3 class="text-yellow-400 font-bold text-sm">ALTURAS DE ANTENA (METROS)</h3></div>
+                    <div><label class="block text-xs">Altura Antena Base (m):</label><input type="number" step="any" name="altura_base" value="0.000" class="w-full bg-gray-700 p-2 text-sm rounded border border-gray-600"></div>
+                    <div><label class="block text-xs">Altura Antena Rover (m):</label><input type="number" step="any" name="altura_rover" value="0.000" class="w-full bg-gray-700 p-2 text-sm rounded border border-gray-600"></div>
+                </div>
+
+                <button type="submit" class="w-full bg-blue-600 hover:bg-blue-500 py-3 rounded font-bold transition text-lg shadow-lg">Inyectar Datos, Descargar y Sincronizar</button>
+            </form>
+            <div id="console1" class="console p-4 mt-4 h-64 overflow-y-auto border border-gray-700 rounded"></div>
+            <button id="btn-pdf-tab1" onclick="descargarTextoPDF('console1', 'Informe_Sincronizacion')" class="hidden mt-4 bg-red-600 hover:bg-red-500 text-white font-bold py-2 px-4 rounded w-full shadow-lg">Descargar Informe de Épocas PDF</button>
+        </section>
+
+        <section id="tab2" class="tab-content bg-gray-800 p-6 rounded shadow-lg">
+            <h2 class="text-xl mb-4 font-semibold border-b border-gray-600 pb-2">Inyección de Órbitas Precisas (SP3)</h2>
+            <p class="text-sm text-gray-400 mb-4">Para evadir los bloqueos de Payload de Vercel, carga manualmente el archivo .SP3 (descomprimido). El servidor descargará el archivo .NAV de respaldo (11+ MB) de forma automática en segundo plano.</p>
+            <form id="form-tab2" onsubmit="submitForm(event, '/API/tab2_efemerides', 'console2', 3)">
+                <div class="grid grid-cols-1 gap-4 mb-4">
+                    <div>
+                        <label class="block text-sm mb-1 font-bold text-purple-400">Órbitas Precisas (.sp3) [REQUERIDO]:</label>
+                        <input type="file" name="file_sp3" required class="w-full bg-gray-700 p-2 rounded border border-purple-500">
+                        <p class="text-xs text-purple-300 mt-1">Sube el archivo descomprimido (.sp3) extraído con la app IGS Downloader.</p>
+                    </div>
+                </div>
+                <button type="submit" class="w-full bg-purple-600 hover:bg-purple-500 py-2 rounded font-bold transition">Cargar SP3 y Autocompletar Efemérides NAV</button>
+            </form>
+            <div id="console2" class="console p-4 mt-4 h-48 overflow-y-auto border border-gray-700 rounded"></div>
+            <button id="btn-pdf-tab2" onclick="descargarTextoPDF('console2', 'Informe_Efemerides')" class="hidden mt-4 bg-red-600 hover:bg-red-500 text-white font-bold py-2 px-4 rounded w-full shadow-lg">Descargar PDF de Efemérides</button>
+        </section>
+
+        <section id="tab3" class="tab-content bg-gray-800 p-6 rounded shadow-lg">
+            <h2 class="text-xl mb-4 font-semibold border-b border-gray-600 pb-2">Calibración Autónoma EKF (Caja Negra)</h2>
+            <p class="text-sm text-gray-400 mb-4">El motor optimizará de manera autónoma los filtros estadísticos utilizando los datos inyectados en la Pestaña 1. <span class="text-red-400 font-bold">Solo lectura. Modificación bloqueada por sistema.</span></p>
+            
+            <form id="form-tab3" onsubmit="submitForm(event, '/API/tab3_calibrar', 'console3', 4)">
+                
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+                    <div class="sm:col-span-2"><h3 class="text-red-400 font-bold text-sm">PUNTOS DE ARRANQUE (DEFAULT SYSTEM)</h3></div>
+                    <div><label class="block text-xs text-gray-500">Límite Horizontal Teórico Inicial (m):</label><input type="number" step="any" name="err_hor_max" value="1.50" class="w-full bg-gray-900 text-gray-500 p-1 text-sm rounded border border-gray-700 cursor-not-allowed" readonly></div>
+                    <div><label class="block text-xs text-gray-500">Límite Vertical Teórico Inicial (m):</label><input type="number" step="any" name="err_ver_max" value="2.00" class="w-full bg-gray-900 text-gray-500 p-1 text-sm rounded border border-gray-700 cursor-not-allowed" readonly></div>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4 border-t border-gray-700 pt-4">
+                    <div class="sm:col-span-3"><h3 class="text-blue-400 font-bold text-sm">Filtros Estadísticos (Centro Malla Monte Carlo)</h3></div>
+                    <div><label class="block text-xs text-gray-500">Máscara Elevación Base (°):</label><input type="number" step="any" name="param_mask" value="5.78" class="w-full bg-gray-900 text-gray-500 p-1 text-sm rounded border border-gray-700 cursor-not-allowed" readonly></div>
+                    <div><label class="block text-xs text-gray-500">Filtro Sigma Plan (cp):</label><input type="number" step="any" name="param_cp" value="2.50" class="w-full bg-gray-900 text-gray-500 p-1 text-sm rounded border border-gray-700 cursor-not-allowed" readonly></div>
+                    <div><label class="block text-xs text-gray-500">Filtro Sigma Alt (ca):</label><input type="number" step="any" name="param_ca" value="3.00" class="w-full bg-gray-900 text-gray-500 p-1 text-sm rounded border border-gray-700 cursor-not-allowed" readonly></div>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4 border-t border-gray-700 pt-4">
+                    <div class="sm:col-span-3"><h3 class="text-orange-400 font-bold text-sm">Configuración Sistémica Inyectada</h3></div>
+                    <div><label class="block text-xs text-gray-500">Tolerancia Sync (sec):</label><input type="number" step="any" name="param_max_gap" value="0.50" class="w-full bg-gray-900 text-gray-500 p-1 text-sm rounded border border-gray-700 cursor-not-allowed" readonly></div>
+                    <div><label class="block text-xs text-gray-500">Máscara SNR Inicial (dBHz):</label><input type="number" step="any" name="param_snr" value="18.50" class="w-full bg-gray-900 text-gray-500 p-1 text-sm rounded border border-gray-700 cursor-not-allowed" readonly></div>
+                    <div>
+                        <label class="block text-xs text-purple-400 font-bold">Iteraciones Sugeridas (Auto):</label>
+                        <input type="number" step="1" id="param_iter" name="param_iter" value="4" class="w-full bg-gray-900 text-purple-400 font-bold p-1 text-sm rounded border border-purple-900 cursor-not-allowed shadow-[0_0_10px_rgba(168,85,247,0.2)]" readonly>
+                    </div>
+                </div>
+
+                <button type="submit" class="w-full bg-purple-600 hover:bg-purple-500 py-3 rounded font-bold transition text-lg mt-2 shadow-lg">Ejecutar Calibración Autónoma (Box Mode)</button>
+            </form>
+            <div id="console3" class="console p-4 mt-4 h-64 overflow-y-auto border border-gray-700 rounded"></div>
+            <button id="btn-pdf-tab3" onclick="descargarTextoPDF('console3', 'Informe_Calibracion_RMSE')" class="hidden mt-4 bg-red-600 hover:bg-red-500 text-white font-bold py-2 px-4 rounded w-full shadow-lg">Descargar Informe de Calibración PDF</button>
+        </section>
+
+        <section id="tab4" class="tab-content bg-gray-800 p-6 rounded shadow-lg">
+            <h2 class="text-xl mb-4 font-semibold border-b border-gray-600 pb-2">Ajuste de Red DGPS Diferencial (Cálculo Rover Desconocido)</h2>
+            <p class="text-sm text-gray-400 mb-4">El motor leerá automáticamente las coordenadas y parámetros óptimos fijados por la Caja Negra. Introduzca únicamente el enlace del Rover Desconocido.</p>
+            
+            <form id="form-tab4" onsubmit="submitForm(event, '/API/tab4_procesar', 'console4', null)">
+                <div class="grid grid-cols-1 gap-4 mb-4">
+                    <div>
+                        <h3 class="text-blue-400 font-bold text-sm mb-2">NUEVO ARCHIVO ROVER (PUNTO DESCONOCIDO)</h3>
+                        <label class="block text-xs text-blue-300 font-bold">Enlace Drive - RINEX Rover (.obs):</label>
+                        <input type="text" name="url_rover_nuevo" required placeholder="https://drive.google.com/file/d/..." class="w-full bg-gray-700 p-3 rounded border border-blue-500 text-white focus:outline-none focus:border-blue-400 shadow-inner">
+                    </div>
+                </div>
+
+                <div class="flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-4 mt-4 border-t border-gray-700 pt-4">
+                    <button type="submit" class="w-full bg-green-600 hover:bg-green-500 py-3 rounded font-bold transition text-lg shadow-lg">Procesar Punto Desconocido</button>
+                    <button type="button" onclick="reiniciarProceso()" class="w-full bg-red-700 hover:bg-red-600 py-3 rounded font-bold transition text-lg shadow-lg border border-red-500">INICIAR DE NUEVO (RESET)</button>
+                </div>
+            </form>
+            
+            <div id="console4" class="console p-4 mt-4 h-96 overflow-y-auto border border-gray-700 rounded"></div>
+            <button id="btn-pdf-tab4" onclick="descargarTextoPDF('console4', 'Informe_Geodesico_DGPS')" class="hidden mt-4 bg-red-600 hover:bg-red-500 text-white font-bold py-2 px-4 rounded w-full shadow-lg">Descargar PDF de Resultados</button>
+        </section>
+    </div>
+
+    <script>
+        // --- CONFIGURACIÓN E INICIALIZACIÓN DE FIREBASE ---
+        const firebaseConfig = {
+          apiKey: "AIzaSyBAASJamPDpSKU6JZx88oLNQprgwkk3DZs",
+          authDomain: "gpsj-6790c.firebaseapp.com",
+          projectId: "gpsj-6790c",
+          storageBucket: "gpsj-6790c.firebasestorage.app",
+          messagingSenderId: "558545141519",
+          appId: "1:558545141519:web:d21e7360d54db4d84d887a"
+        };
+
+        firebase.initializeApp(firebaseConfig);
+        const auth = firebase.auth();
+
+        let localToken = localStorage.getItem('gnssjp_token');
+        if (!localToken) {
+            localToken = Date.now().toString() + Math.random().toString(36).substring(2);
+            localStorage.setItem('gnssjp_token', localToken);
+        }
+
+        let heartbeatTimer = null;
+
+        async function startSessionHeartbeat(user) {
+            const beat = async () => {
+                try {
+                    await user.reload(); 
+                    const currentData = user.displayName;
+                    if (currentData) {
+                        const parts = currentData.split("_");
+                        if (parts.length === 2 && parts[1] !== localToken) {
+                            stopSessionHeartbeat();
+                            alert("SESIÓN FINALIZADA: Se ha iniciado sesión en otro dispositivo. Por seguridad, esta ventana se cerrará.");
+                            window.location.reload(); 
+                            return;
+                        }
+                    }
+                    const payload = Date.now() + "_" + localToken;
+                    await user.updateProfile({ displayName: payload });
+                } catch (e) {}
+            };
+            await beat();
+            heartbeatTimer = setInterval(beat, 45000);
+        }
+
+        function stopSessionHeartbeat() {
+            if (heartbeatTimer) clearInterval(heartbeatTimer);
+        }
+
+        auth.onAuthStateChanged(async (user) => {
+            const loginContainer = document.getElementById('login-container');
+            const appContainer = document.getElementById('app-container');
+            const errorDiv = document.getElementById('login-error');
+            
+            if (user) {
+                const currentData = user.displayName; 
+                let isLockedOut = false;
+
+                if (currentData) {
+                    const parts = currentData.split("_");
+                    if (parts.length === 2) {
+                        const lastBeat = parseInt(parts[0]);
+                        const activeToken = parts[1];
+                        const timeSinceLastBeat = Date.now() - lastBeat;
+
+                        if (activeToken !== localToken && timeSinceLastBeat < 90000) {
+                            isLockedOut = true;
+                        }
+                    }
+                }
+
+                if (isLockedOut) {
+                    errorDiv.innerText = "ACCESO DENEGADO: El usuario ya está activo en otro dispositivo al mismo tiempo.";
+                    errorDiv.classList.remove('hidden');
+                    await auth.signOut();
+                    return; 
+                }
+
+                startSessionHeartbeat(user);
+                loginContainer.classList.add('hidden');
+                appContainer.classList.remove('hidden');
+                errorDiv.innerText = "";
+                document.getElementById('login-form').reset();
+            } else {
+                stopSessionHeartbeat();
+                appContainer.classList.add('hidden');
+                loginContainer.classList.remove('hidden');
+            }
+        });
+
+        async function loginUsuario(e) {
+            e.preventDefault();
+            const email = document.getElementById('login-email').value;
+            const password = document.getElementById('login-password').value;
+            const errorDiv = document.getElementById('login-error');
+            errorDiv.classList.add('hidden');
+            try { await auth.signInWithEmailAndPassword(email, password); } 
+            catch (error) {
+                errorDiv.innerText = "Error: " + error.message;
+                errorDiv.classList.remove('hidden');
+            }
+        }
+
+        async function cerrarSesion() {
+            if (auth.currentUser) {
+                stopSessionHeartbeat();
+                try { await auth.currentUser.updateProfile({ displayName: "" }); } catch (error) {}
+            }
+            auth.signOut();
+        }
+
+        function switchTab(num) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.getElementById('tab' + num).classList.add('active');
+            
+            document.querySelectorAll('#tabs-nav button').forEach(el => {
+                el.classList.remove('bg-blue-600');
+                el.classList.add('bg-gray-700');
+            });
+            document.getElementById('btn-tab' + num).classList.remove('bg-gray-700');
+            document.getElementById('btn-tab' + num).classList.add('bg-blue-600');
+        }
+
+        function bloquearFormulario(tabNum) {
+            const form = document.getElementById('form-tab' + tabNum);
+            if (form) {
+                const elementos = form.querySelectorAll('input, select, button[type="submit"]');
+                elementos.forEach(el => {
+                    el.disabled = true;
+                    el.classList.add('opacity-50', 'cursor-not-allowed');
+                });
+            }
+        }
+
+        function desbloquearFormulario(tabNum) {
+            const form = document.getElementById('form-tab' + tabNum);
+            if (form) {
+                const elementos = form.querySelectorAll('input, select, button[type="submit"]');
+                elementos.forEach(el => {
+                    el.disabled = false;
+                    el.classList.remove('opacity-50', 'cursor-not-allowed');
+                });
+            }
+        }
+
+        function reiniciarProceso() {
+            if (!confirm("ALERTA: ¿Desea iniciar un nuevo proyecto? Se borrará todo el estado actual.")) return;
+            for (let i = 1; i <= 4; i++) {
+                const form = document.getElementById('form-tab' + i);
+                if (form) form.reset();
+                const consola = document.getElementById('console' + i);
+                if (consola) consola.textContent = '';
+                const btnPdf = document.getElementById('btn-pdf-tab' + i);
+                if (btnPdf) btnPdf.classList.add('hidden');
+                
+                desbloquearFormulario(i);
+                if (i > 1) document.getElementById('btn-tab' + i).classList.add('disabled-tab');
+            }
+            switchTab(1);
+        }
+
+        // --- SISTEMA DE AUDIO (AVISO BEEP) ---
+        function playSuccessBeep() {
+            try {
+                const AudioContext = window.AudioContext || window.webkitAudioContext;
+                if (!AudioContext) return;
+                const ctx = new AudioContext();
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(880, ctx.currentTime); // Nota A5
+                
+                gain.gain.setValueAtTime(0.1, ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.00001, ctx.currentTime + 0.6);
+                
+                osc.start(ctx.currentTime);
+                osc.stop(ctx.currentTime + 0.6);
+            } catch(e) { console.error("Audio bloqueado por navegador", e); }
+        }
+
+        // --- MOTOR CENTRAL ---
+        async function submitForm(e, url, consoleId, nextTab) {
+            e.preventDefault();
+            const form = e.target;
+            const data = new FormData(form);
+            const display = document.getElementById(consoleId);
+            display.textContent = "> Iniciando comunicación con el motor GNSSJP...\n";
+            
+            const pdfButtons = ['btn-pdf-tab1', 'btn-pdf-tab2', 'btn-pdf-tab3', 'btn-pdf-tab4'];
+            pdfButtons.forEach(id => {
+                const btn = document.getElementById(id);
+                if(btn && consoleId === id.replace('btn-pdf-', 'console')) btn.classList.add('hidden');
+            });
+
+            // Lógica UI Modal Pestaña 3
+            const modal = document.getElementById('progress-modal');
+            const progressBar = document.getElementById('progress-bar');
+            const progressText = document.getElementById('progress-text');
+            const progressStatus = document.getElementById('progress-status');
+            
+            if (url === '/API/tab3_calibrar') {
+                modal.classList.remove('hidden');
+                progressBar.style.width = '0%';
+                progressText.innerText = '0%';
+                progressStatus.innerText = 'Configurando mallas matriciales EKF...';
+            }
+
+            let fullOutput = "";
+
+            try {
+                const response = await fetch(url, { method: 'POST', body: data });
+                if (!response.body) throw new Error("No se recibió respuesta del servidor.");
+                
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    
+                    let text = decoder.decode(value, { stream: true });
+                    fullOutput += text;
+                    
+                    // --- EXTRACCIÓN AUTOMÁTICA DE ITERACIONES (Pestaña 1 -> Pestaña 3) ---
+                    if (url === '/API/tab1_homogenizar') {
+                        const iterMatch = text.match(/Iteraciones EKF Sugeridas\s*:\s*(\d+)/);
+                        if (iterMatch && iterMatch[1]) {
+                            const iterField = document.getElementById('param_iter');
+                            if (iterField) iterField.value = iterMatch[1];
+                        }
+                    }
+
+                    // --- EXTRACCIÓN DE PROGRESO (Modal Pestaña 3) ---
+                    if (url === '/API/tab3_calibrar' && text.includes('Zoom')) {
+                        const zoomMatches = text.match(/Zoom\s+(\d+)\/(\d+)/g);
+                        if (zoomMatches) {
+                            const lastMatch = zoomMatches[zoomMatches.length - 1];
+                            const parts = lastMatch.match(/Zoom\s+(\d+)\/(\d+)/);
+                            if (parts) {
+                                const current = parseInt(parts[1]);
+                                const total = parseInt(parts[2]);
+                                const pct = Math.min(100, Math.round(((current - 1) / total) * 100) + 15); // Suavizado visual
+                                progressBar.style.width = pct + '%';
+                                progressText.innerText = pct + '%';
+                                progressStatus.innerText = `Refinando nivel de profundidad ${current} de ${total}...`;
+                            }
+                        }
+                    }
+
+                    // Cierre del modal en caso de Error crítico
+                    if (url === '/API/tab3_calibrar' && text.includes('[ERROR')) {
+                        modal.classList.add('hidden');
+                    }
+                    
+                    display.textContent = fullOutput;
+                    display.scrollTop = display.scrollHeight;
+                }
+
+                if (fullOutput.includes('[SUCCESS]')) {
+                    
+                    if (url === '/API/tab3_calibrar') {
+                        progressBar.style.width = '100%';
+                        progressText.innerText = '100%';
+                        progressStatus.innerText = '¡Filtros Calibrados Exitosamente!';
+                        
+                        // Esperar medio segundo, reproducir beep y ocultar modal
+                        setTimeout(() => {
+                            modal.classList.add('hidden');
+                            playSuccessBeep();
+                        }, 600);
+                    }
+
+                    if (nextTab) {
+                        document.getElementById('btn-tab' + nextTab).classList.remove('disabled-tab');
+                        bloquearFormulario(nextTab - 1);
+                        switchTab(nextTab);
+                    }
+                    
+                    if (consoleId === 'console1') document.getElementById('btn-pdf-tab1').classList.remove('hidden');
+                    if (consoleId === 'console2') document.getElementById('btn-pdf-tab2').classList.remove('hidden');
+                    if (consoleId === 'console3') document.getElementById('btn-pdf-tab3').classList.remove('hidden');
+                    if (consoleId === 'console4') document.getElementById('btn-pdf-tab4').classList.remove('hidden');
+                }
+
+            } catch (err) {
+                display.textContent += "\n[ERROR] " + err.message;
+                if (url === '/API/tab3_calibrar') modal.classList.add('hidden');
+            }
+        }
+
+        function descargarTextoPDF(consoleId, nombreBase) {
+            try {
+                const display = document.getElementById(consoleId);
+                if (!display) { alert("Consola no encontrada."); return; }
+                const { jsPDF } = window.jspdf;
+                
+                let lineasCrudas = display.textContent.split('\n');
+                let reporteLimpio = lineasCrudas.filter(l => 
+                    !l.includes('[SUCCESS]') && !l.includes('[PROGRESO]') && l.trim() !== ''
+                ).map(l => l.startsWith('>') ? l.substring(1).trim() : l);
+
+                if (reporteLimpio.length === 0) { alert("No hay datos válidos."); return; }
+
+                const doc = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'letter' });
+                doc.setFont("courier", "normal");
+                doc.setFontSize(10);
+                
+                let pos_y = 50; const pos_x = 40; const maxLineWidth = 530; 
+                
+                for(let i=0; i < reporteLimpio.length; i++) {
+                    let lineasDivididas = doc.splitTextToSize(reporteLimpio[i], maxLineWidth);
+                    for(let j=0; j < lineasDivididas.length; j++) {
+                        if (pos_y > 740) { doc.addPage(); pos_y = 50; }
+                        doc.text(lineasDivididas[j], pos_x, pos_y);
+                        pos_y += 14; 
+                    }
+                }
+                doc.save(nombreBase + '_' + new Date().getTime() + '.pdf');
+            } catch (error) { alert("Ocurrió un error al generar el PDF."); }
+        }
+    </script>
+</body>
+</html>
