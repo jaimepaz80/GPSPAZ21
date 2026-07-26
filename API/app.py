@@ -322,7 +322,7 @@ def obtener_fecha_obs(filepath):
     return None
 
 # =====================================================================
-# PRODUCTOS IGS Y EFEMÉRIDES (HÍBRIDO NAV / SP3)
+# PRODUCTOS IGS Y EFEMÉRIDES (HÍBRIDO NAV / SP3 ESTRICTO)
 # =====================================================================
 SP3_CACHE = {}
 SP3_CACHE_KEYS = []
@@ -635,7 +635,7 @@ def calcular_posicion_satelite_wgs84(eph, t_emision, tau_vuelo, sys_char='G'):
     return (xs * math.cos(theta) + ys * math.sin(theta), -xs * math.sin(theta) + ys * math.cos(theta), zs, dt_sat)
 
 # =====================================================================
-# ENRUTADOR AUTOMÁTICO (REGLAS EXCLUYENTES ESTRICTAS)
+# ENRUTADOR AUTOMÁTICO (REGLAS EXCLUYENTES ESTRICTAS ACTUALIZADAS)
 # =====================================================================
 def analizar_calidad_y_senales_rinex(obs_b, obs_r, max_gap_tolerado=0.05):
     tows_b = sorted(list(obs_b.keys()))
@@ -689,17 +689,17 @@ def analizar_calidad_y_senales_rinex(obs_b, obs_r, max_gap_tolerado=0.05):
     if ratio_sync < 0.5:
         return "MODO_B_ASINCRONO", ratio_sync, f"Alta asincronía detectada ({ratio_sync*100:.1f}%). Enrutando a Módulo B IRLS para evitar colapso."
 
+    # MÓDULO C: Ambos tienen L1 + L5 completos
     if (base_C1 and base_L1 and base_C5 and base_L5) and (rover_C1 and rover_L1 and rover_C5 and rover_L5):
-        return "MODO_C_PPK", ratio_sync, "Doble Frecuencia L1+L5 con Fase detectada en Base y Rover. Enrutando a Módulo C (PPK Dual)."
+        return "MODO_C_PPK", ratio_sync, "Doble frecuencia L1+L5 detectada en ambos RINEX. Enrutamiento excluyente a Módulo C (PPK Dual)."
     
-    elif (base_C1 and base_L1) and (rover_C1 and rover_L1):
-        return "MODO_A_CODIGO", ratio_sync, "Monofrecuencia L1 con Fase Portadora detectada. Enrutando a Módulo A (EKF) para resolución de ambigüedades."
+    # MÓDULO A: Ambos tienen únicamente C1 (Sin fases L1 ni L5)
+    elif (base_C1 and not base_L1 and not base_C5) and (rover_C1 and not rover_L1 and not rover_L5):
+        return "MODO_A_CODIGO", ratio_sync, "Código C1 puro detectado sin fases L1/L5 en ambos RINEX. Enrutamiento a Módulo A (Código)."
         
-    elif base_C1 and rover_C1:
-        return "MODO_B_FASE", ratio_sync, "Código Puro (L1) detectado sin observables de Fase válidas. Enrutando a Módulo B (IRLS) por exclusión geométrica."
-        
+    # MÓDULO B: Por exclusión absoluta para cualquier otra asimetría o combinación
     else:
-        return "MODO_B_ASINCRONO", ratio_sync, "Señales heterogéneas o corruptas. Enrutando a Módulo B (Safe Fallback)."
+        return "MODO_B_FASE", ratio_sync, "Combinación asimétrica o señales mixtas. Enrutando a Módulo B (IRLS) por exclusión."
 
 # =====================================================================
 # AISLAMIENTO DE OBSERVABLES (MÓDULOS A, B Y C)
@@ -914,23 +914,27 @@ def procesar_ekF_lambda(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_mask)
             
             sp_r, sp_b = None, None
             
-            if sp3 and s in sp3:
-                sp3_res_r = interpolate_sp3(sp3, s, t_emision_r)
-                sp3_res_b = interpolate_sp3(sp3, s, t_emision_b)
-                if sp3_res_r and sp3_res_b:
-                    theta_r = OMEGA_E * tau_r
-                    xs_r = sp3_res_r[0] * math.cos(theta_r) + sp3_res_r[1] * math.sin(theta_r)
-                    ys_r = -sp3_res_r[0] * math.sin(theta_r) + sp3_res_r[1] * math.cos(theta_r)
-                    sp_r = (xs_r, ys_r, sp3_res_r[2], sp3_res_r[3]) 
-                    
-                    theta_b = OMEGA_E * tau_b
-                    xs_b = sp3_res_b[0] * math.cos(theta_b) + sp3_res_b[1] * math.sin(theta_b)
-                    ys_b = -sp3_res_b[0] * math.sin(theta_b) + sp3_res_b[1] * math.cos(theta_b)
-                    sp_b = (xs_b, ys_b, sp3_res_b[2], sp3_res_b[3])
+            nav_res_r = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), t_emision_r), t_emision_r, tau_r, s[0])
+            nav_res_b = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), t_emision_b), t_emision_b, tau_b, s[0])
             
-            if not sp_r or not sp_b:
-                sp_r = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), t_emision_r), t_emision_r, tau_r, s[0])
-                sp_b = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), t_emision_b), t_emision_b, tau_b, s[0])
+            if nav_res_r and nav_res_b:
+                if sp3: 
+                    if s in sp3:
+                        sp3_res_r = interpolate_sp3(sp3, s, t_emision_r)
+                        sp3_res_b = interpolate_sp3(sp3, s, t_emision_b)
+                        if sp3_res_r and sp3_res_b:
+                            theta_r = OMEGA_E * tau_r
+                            xs_r = sp3_res_r[0] * math.cos(theta_r) + sp3_res_r[1] * math.sin(theta_r)
+                            ys_r = -sp3_res_r[0] * math.sin(theta_r) + sp3_res_r[1] * math.cos(theta_r)
+                            sp_r = (xs_r, ys_r, sp3_res_r[2], nav_res_r[3]) 
+                            
+                            theta_b = OMEGA_E * tau_b
+                            xs_b = sp3_res_b[0] * math.cos(theta_b) + sp3_res_b[1] * math.sin(theta_b)
+                            ys_b = -sp3_res_b[0] * math.sin(theta_b) + sp3_res_b[1] * math.cos(theta_b)
+                            sp_b = (xs_b, ys_b, sp3_res_b[2], nav_res_b[3])
+                else: 
+                    sp_r = nav_res_r
+                    sp_b = nav_res_b
             
             if sp_r and sp_b:
                 el_r, az_r = calcular_topocentricas(sp_r[0], sp_r[1], sp_r[2], X_apc, Y_apc, Z_apc)
@@ -1100,16 +1104,18 @@ def calcular_IRLS_MODO_B(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle):
             t_emision = tr - tau
             sp = None
             
-            if sp3 and s in sp3:
-                sp3_res = interpolate_sp3(sp3, s, t_emision)
-                if sp3_res:
-                    theta = OMEGA_E * tau
-                    xs = sp3_res[0] * math.cos(theta) + sp3_res[1] * math.sin(theta)
-                    ys = -sp3_res[0] * math.sin(theta) + sp3_res[1] * math.cos(theta)
-                    sp = (xs, ys, sp3_res[2], sp3_res[3])
-                    
-            if not sp:
-                sp = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), t_emision), t_emision, tau, s[0])
+            nav_res = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), t_emision), t_emision, tau, s[0])
+            if nav_res:
+                if sp3:
+                    if s in sp3:
+                        sp3_res = interpolate_sp3(sp3, s, t_emision)
+                        if sp3_res:
+                            theta = OMEGA_E * tau
+                            xs = sp3_res[0] * math.cos(theta) + sp3_res[1] * math.sin(theta)
+                            ys = -sp3_res[0] * math.sin(theta) + sp3_res[1] * math.cos(theta)
+                            sp = (xs, ys, sp3_res[2], nav_res[3])
+                else:
+                    sp = nav_res
                 
             if sp:
                 el_r, az_r = calcular_topocentricas(sp[0], sp[1], sp[2], X_iter, Y_iter, Z_iter)
@@ -1274,17 +1280,22 @@ def procesar_ekF_PPK_L1_L5(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_ma
             t_emision_r, t_emision_b = tr - tau_r, tow_b - tau_b
             
             sp_r, sp_b = None, None
-            if sp3 and s in sp3:
-                sp3_res_r, sp3_res_b = interpolate_sp3(sp3, s, t_emision_r), interpolate_sp3(sp3, s, t_emision_b)
-                if sp3_res_r and sp3_res_b:
-                    theta_r, theta_b = OMEGA_E * tau_r, OMEGA_E * tau_b
-                    xs_r, ys_r = sp3_res_r[0] * math.cos(theta_r) + sp3_res_r[1] * math.sin(theta_r), -sp3_res_r[0] * math.sin(theta_r) + sp3_res_r[1] * math.cos(theta_r)
-                    xs_b, ys_b = sp3_res_b[0] * math.cos(theta_b) + sp3_res_b[1] * math.sin(theta_b), -sp3_res_b[0] * math.sin(theta_b) + sp3_res_b[1] * math.cos(theta_b)
-                    sp_r, sp_b = (xs_r, ys_r, sp3_res_r[2], sp3_res_r[3]), (xs_b, ys_b, sp3_res_b[2], sp3_res_b[3])
+            nav_res_r = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), t_emision_r), t_emision_r, tau_r, s[0])
+            nav_res_b = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), t_emision_b), t_emision_b, tau_b, s[0])
             
-            if not sp_r or not sp_b:
-                sp_r = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), t_emision_r), t_emision_r, tau_r, s[0])
-                sp_b = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), t_emision_b), t_emision_b, tau_b, s[0])
+            if nav_res_r and nav_res_b:
+                if sp3:
+                    if s in sp3:
+                        sp3_res_r = interpolate_sp3(sp3, s, t_emision_r)
+                        sp3_res_b = interpolate_sp3(sp3, s, t_emision_b)
+                        if sp3_res_r and sp3_res_b:
+                            theta_r, theta_b = OMEGA_E * tau_r, OMEGA_E * tau_b
+                            xs_r, ys_r = sp3_res_r[0] * math.cos(theta_r) + sp3_res_r[1] * math.sin(theta_r), -sp3_res_r[0] * math.sin(theta_r) + sp3_res_r[1] * math.cos(theta_r)
+                            xs_b, ys_b = sp3_res_b[0] * math.cos(theta_b) + sp3_res_b[1] * math.sin(theta_b), -sp3_res_b[0] * math.sin(theta_b) + sp3_res_b[1] * math.cos(theta_b)
+                            sp_r, sp_b = (xs_r, ys_r, sp3_res_r[2], nav_res_r[3]), (xs_b, ys_b, sp3_res_b[2], nav_res_b[3])
+                else:
+                    sp_r = nav_res_r
+                    sp_b = nav_res_b
             
             if sp_r and sp_b:
                 el_r, az_r = calcular_topocentricas(sp_r[0], sp_r[1], sp_r[2], X_apc, Y_apc, Z_apc)
@@ -1835,7 +1846,6 @@ def tab3_calibrar():
     p_max_gap = safe_f(request.form.get('param_max_gap'), 0.5)
     p_snr = safe_f(request.form.get('param_snr'), 25.0)
     p_iter = safe_i(request.form.get('param_iter'), 6)
-    p_iter = max(1, min(p_iter, 8)) 
 
     def procesar():
         t_inicio_proceso = datetime.datetime.now()
@@ -1907,7 +1917,7 @@ def tab3_calibrar():
                 yield f"  [*] Límite Horizontal EKF Inyectado: {f_14(best_eh)} m\n"
                 yield f"  [*] Límite Vertical EKF Inyectado: {f_14(best_ev)} m\n\n"
                 
-                yield f"[PROGRESO] Fase 2: Malla Pentadimensional EKF (Iteraciones: {p_iter})...\n"
+                yield f"[PROGRESO] Fase 2: Malla Pentadimensional EKF...\n"
                 global_best_score = float('inf')
                 best_rmse = float('inf')
                 best_params = {}
@@ -1915,8 +1925,8 @@ def tab3_calibrar():
                 m_center, m_span = 10.0, 5.0
                 cp_center, cp_span = 2.0, 1.5
                 ca_center, ca_span = 2.0, 1.5
-                snr_center, snr_span = p_snr, 5.0
-                gap_center, gap_span = p_max_gap, 0.02
+                snr_center = p_snr
+                gap_center = p_max_gap
                 
                 p_b_raw = leer_estado('base_raw')
                 p_r_raw = os.path.join(UPLOAD_FOLDER, 'rover_calibracion_raw.obs')
@@ -1926,87 +1936,87 @@ def tab3_calibrar():
                 base_tows_full = sorted(list(obs_b_full.keys()))
                 
                 ultimo_porcentaje = 0
+                paso_actual = 0
                 
-                for nivel in range(p_iter):
-                    yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{p_iter})...\n"
+                opt_iter = max(1, min(p_iter, 4))
+                
+                for nivel in range(opt_iter):
+                    yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{opt_iter})...\n"
                     m_grid = [max(1.0, min(25.0, x)) for x in [m_center - m_span, m_center, m_center + m_span]]
                     cp_grid = [max(0.1, min(5.0, x)) for x in [cp_center - cp_span, cp_center, cp_center + cp_span]]
                     ca_grid = [max(0.1, min(5.0, x)) for x in [ca_center - ca_span, ca_center, ca_center + ca_span]]
-                    snr_grid = [max(25.0, min(45.0, x)) for x in [snr_center - snr_span, snr_center, snr_center + snr_span]]
-                    gap_grid = [max(0.01, min(0.05, x)) for x in [gap_center - gap_span, gap_center, gap_center + gap_span]]
                     
                     nivel_best_rmse = float('inf')
                     nivel_best_params = {}
                     
-                    gap_set = list(set(gap_grid))
                     m_set = list(set(m_grid))
-                    snr_set = list(set(snr_grid))
-                    comb_totales = max(1, len(gap_set) * len(m_set) * len(snr_set))
-                    comb_actual = 0
+                    total_ekf_runs_nivel = len(m_set)
                     
-                    for gap in gap_set:
-                        obs_b_sync = {}
-                        for tr in rover_tows_full:
-                            if not base_tows_full: continue
-                            idx = min(range(len(base_tows_full)), key=lambda i: abs(base_tows_full[i] - tr))
-                            if abs(base_tows_full[idx] - tr) <= gap:
-                                obs_b_sync[tr] = obs_b_full[base_tows_full[idx]].copy()
-                                obs_b_sync[tr]['_meta'] = obs_r_full[tr]['_meta']
-                                
-                        if modo_str == "MODO_A_CODIGO":
-                            sd_suav = aislar_diferencias_simples_ppk(obs_b_sync, obs_r_full)
-                        else:
-                            sd_suav = aislar_diferencias_MODO_C(obs_b_sync, obs_r_full)
+                    gap = gap_center
+                    snr = snr_center
+                    
+                    obs_b_sync = {}
+                    for tr in rover_tows_full:
+                        if not base_tows_full: continue
+                        idx = min(range(len(base_tows_full)), key=lambda i: abs(base_tows_full[i] - tr))
+                        if abs(base_tows_full[idx] - tr) <= gap:
+                            obs_b_sync[tr] = obs_b_full[base_tows_full[idx]].copy()
+                            obs_b_sync[tr]['_meta'] = obs_r_full[tr]['_meta']
                             
-                        t_samp = list(sd_suav.keys())
-                        if not sd_suav: continue
+                    if modo_str == "MODO_A_CODIGO":
+                        sd_suav = aislar_diferencias_simples_ppk(obs_b_sync, obs_r_full)
+                    else:
+                        sd_suav = aislar_diferencias_MODO_C(obs_b_sync, obs_r_full)
                         
-                        t_samp_reducido = t_samp[::3]
-                        if not t_samp_reducido: continue
-                        epocas_totales = len(t_samp_reducido)
+                    t_samp = list(sd_suav.keys())
+                    if not sd_suav: continue
+                    
+                    t_samp_reducido = t_samp[::3]
+                    if not t_samp_reducido: continue
+                    epocas_totales = len(t_samp_reducido)
+                    total_pasos_absolutos = opt_iter * total_ekf_runs_nivel * epocas_totales
+                    
+                    for m in m_set:
+                        kf_est = {'X': [[X_bg], [Y_bg], [Z_bg]], 'P': P_init, 'X_base': (X_b, Y_b, Z_b), 'fix_flags': 0, 'h_r': h_r}
+                        coords = []
+                        for idx_t, t in enumerate(t_samp_reducido):
+                            if modo_str == "MODO_A_CODIGO":
+                                sem, status, kf_est, _ = procesar_ekF_lambda(sd_suav[t], nav, sp3, kf_est, t, m, snr)
+                            else:
+                                sem, status, kf_est, _ = procesar_ekF_PPK_L1_L5(sd_suav[t], nav, sp3, kf_est, t, m, snr)
+                                
+                            if sem:
+                                la, lo, al = ecef_a_geodesicas(sem[0], sem[1], sem[2])
+                                nt, et = geodesicas_a_utm(la, lo, utm_h)
+                                coords.append((nt, et, al, status))
+                                
+                            paso_incremental = paso_actual * epocas_totales + (idx_t + 1)
+                            pct = int((paso_incremental / max(1, total_pasos_absolutos)) * 100.0)
+                            if pct > ultimo_porcentaje:
+                                for p in range(ultimo_porcentaje + 1, min(101, pct + 1)):
+                                    yield f"[PROGRESO] Calibrando Malla EKF... {p}%\n"
+                                ultimo_porcentaje = pct
                         
-                        for m in m_set:
-                            for snr in snr_set:
-                                kf_est = {'X': [[X_bg], [Y_bg], [Z_bg]], 'P': P_init, 'X_base': (X_b, Y_b, Z_b), 'fix_flags': 0, 'h_r': h_r}
-                                coords = []
-                                for idx_t, t in enumerate(t_samp_reducido):
-                                    if modo_str == "MODO_A_CODIGO":
-                                        sem, status, kf_est, _ = procesar_ekF_lambda(sd_suav[t], nav, sp3, kf_est, t, m, snr)
-                                    else:
-                                        sem, status, kf_est, _ = procesar_ekF_PPK_L1_L5(sd_suav[t], nav, sp3, kf_est, t, m, snr)
-                                        
-                                    if sem:
-                                        la, lo, al = ecef_a_geodesicas(sem[0], sem[1], sem[2])
-                                        nt, et = geodesicas_a_utm(la, lo, utm_h)
-                                        coords.append((nt, et, al, status))
-                                        
-                                    progreso_actual = ((nivel + (comb_actual + (idx_t + 1) / epocas_totales) / comb_totales) / p_iter) * 100.0
-                                    pct = int(progreso_actual)
-                                    if pct > ultimo_porcentaje:
-                                        for p in range(ultimo_porcentaje + 1, min(101, pct + 1)):
-                                            yield f"[PROGRESO] Calibrando Malla EKF... {p}%\n"
-                                        ultimo_porcentaje = pct
+                        paso_actual += 1
+                        
+                        if len(coords) < (len(t_samp_reducido) * 0.1): continue
+                        
+                        for cp in set(cp_grid):
+                            for ca in set(ca_grid):
+                                res = estadistica_desacoplada(coords, cp, ca, best_eh, best_ev)
+                                if res[0] is None: continue
+                                nf, ef, zf, std_n, std_e, std_z, ret, fix_ratio = res
                                 
-                                comb_actual += 1
+                                rmse_3d = math.sqrt((nf - utm_n_r)**2 + (ef - utm_e_r)**2 + (zf - utm_c_r)**2)
+                                score = (rmse_3d ** 3) * (1.0 + gap * 0.05) * (1.0 + (1.0 - (fix_ratio/100.0)) * 2.0)
                                 
-                                if len(coords) < (len(t_samp_reducido) * 0.1): continue
-                                
-                                for cp in set(cp_grid):
-                                    for ca in set(ca_grid):
-                                        res = estadistica_desacoplada(coords, cp, ca, best_eh, best_ev)
-                                        if res[0] is None: continue
-                                        nf, ef, zf, std_n, std_e, std_z, ret, fix_ratio = res
-                                        
-                                        rmse_3d = math.sqrt((nf - utm_n_r)**2 + (ef - utm_e_r)**2 + (zf - utm_c_r)**2)
-                                        score = (rmse_3d ** 3) * (1.0 + gap * 0.05) * (1.0 + (1.0 - (fix_ratio/100.0)) * 2.0)
-                                        
-                                        if score < nivel_best_rmse:
-                                            nivel_best_rmse = score
-                                            nivel_best_params = {'m': m, 'snr': snr, 'gap': gap, 'cp': cp, 'ca': ca, 'rmse': rmse_3d}
-                                            if score < global_best_score:
-                                                global_best_score = score
-                                                best_rmse = rmse_3d
-                                                best_params = {'mask': m, 'cp': cp, 'ca': ca, 'eh': best_eh, 'ev': best_ev, 'max_gap': gap, 'snr': snr, 'rmse': rmse_3d, 'ret': ret, 'dn': nf - utm_n_r, 'de': ef - utm_e_r, 'dz': zf - utm_c_r}
+                                if score < nivel_best_rmse:
+                                    nivel_best_rmse = score
+                                    nivel_best_params = {'m': m, 'snr': snr, 'gap': gap, 'cp': cp, 'ca': ca, 'rmse': rmse_3d}
+                                    if score < global_best_score:
+                                        global_best_score = score
+                                        best_rmse = rmse_3d
+                                        best_params = {'mask': m, 'cp': cp, 'ca': ca, 'eh': best_eh, 'ev': best_ev, 'max_gap': gap, 'snr': snr, 'rmse': rmse_3d, 'ret': ret, 'dn': nf - utm_n_r, 'de': ef - utm_e_r, 'dz': zf - utm_c_r}
                     
                     if nivel_best_rmse != float('inf'):
                         yield f"  [*] Fin Iteración {nivel+1} | Mejor RMSE Local: {f_14(nivel_best_params['rmse'])} m\n"
@@ -2015,10 +2025,8 @@ def tab3_calibrar():
                         m_center, m_span = best_params['mask'], m_span / 2.0
                         cp_center, cp_span = best_params['cp'], cp_span / 2.0
                         ca_center, ca_span = best_params['ca'], ca_span / 2.0
-                        snr_center, snr_span = best_params['snr'], snr_span / 2.0
-                        gap_center, gap_span = best_params['max_gap'], gap_span / 2.0
                     else:
-                        m_span /= 2.0; cp_span /= 2.0; ca_span /= 2.0; snr_span /= 2.0; gap_span /= 2.0
+                        m_span /= 2.0; cp_span /= 2.0; ca_span /= 2.0
 
             else:
                 yield f"> [SISTEMA] Iniciando Búsqueda Determinista (Optimizado Render) | MÓDULO B (IRLS Clásico + Mareas)...\n"
@@ -2041,7 +2049,7 @@ def tab3_calibrar():
                 if not sd_suavizada: yield "> [ERROR] No hay épocas sincronizadas válidas.\n"; return
                 t_sample = list(sd_suavizada.keys())
                 
-                yield "[PROGRESO] Fase 1: Extracción de Límites (Pre-Scan Clásico IRLS)...\n"
+                yield "[PROGRESO] Fase 1: Extracción Límites (Pre-Scan Clásico IRLS)...\n"
                 coords_raw = []
                 
                 t_sample_fase1 = t_sample[::3]
@@ -2063,7 +2071,7 @@ def tab3_calibrar():
                 yield f"  [*] Límite Horizontal IRLS Inyectado: {f_14(best_eh)} m\n"
                 yield f"  [*] Límite Vertical IRLS Inyectado: {f_14(best_ev)} m\n\n"
                 
-                yield f"[PROGRESO] Fase 2: Malla Tridimensional Clásica (Iteraciones: {p_iter})...\n"
+                yield f"[PROGRESO] Fase 2: Malla Tridimensional Clásica...\n"
                 global_best_score = float('inf')
                 best_rmse = float('inf')
                 best_params = {}
@@ -2073,9 +2081,12 @@ def tab3_calibrar():
                 ca_center, ca_span = 2.0, 1.5
                 
                 ultimo_porcentaje = 0
+                paso_actual = 0
                 
-                for nivel in range(p_iter):
-                    yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{p_iter})...\n"
+                opt_iter = max(1, min(p_iter, 4))
+                
+                for nivel in range(opt_iter):
+                    yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{opt_iter})...\n"
                     m_grid = [max(5.0, min(15.0, x)) for x in [m_center - m_span, m_center, m_center + m_span]]
                     cp_grid = [max(0.1, min(5.0, x)) for x in [cp_center - cp_span, cp_center, cp_center + cp_span]]
                     ca_grid = [max(0.1, min(5.0, x)) for x in [ca_center - ca_span, ca_center, ca_center + ca_span]]
@@ -2084,15 +2095,15 @@ def tab3_calibrar():
                     nivel_best_params = {}
                     
                     m_set = list(set(m_grid))
-                    comb_totales = max(1, len(m_set))
-                    comb_actual = 0
+                    total_irls_runs_nivel = len(m_set)
+                    
+                    t_samp_reducido = t_sample[::3]
+                    if not t_samp_reducido: continue
+                    epocas_totales = len(t_samp_reducido)
+                    total_pasos_absolutos = opt_iter * total_irls_runs_nivel * epocas_totales
                     
                     for m in m_set:
                         coords = []
-                        t_samp_reducido = t_sample[::3]
-                        if not t_samp_reducido: continue
-                        epocas_totales = len(t_samp_reducido)
-                        
                         for idx_t, t in enumerate(t_samp_reducido):
                             sem, status = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, m)
                             if sem:
@@ -2100,14 +2111,14 @@ def tab3_calibrar():
                                 nt, et = geodesicas_a_utm(la, lo, utm_h)
                                 coords.append((nt, et, al, status))
                                 
-                            progreso_actual = ((nivel + (comb_actual + (idx_t + 1) / epocas_totales) / comb_totales) / p_iter) * 100.0
-                            pct = int(progreso_actual)
+                            paso_incremental = paso_actual * epocas_totales + (idx_t + 1)
+                            pct = int((paso_incremental / max(1, total_pasos_absolutos)) * 100.0)
                             if pct > ultimo_porcentaje:
                                 for p in range(ultimo_porcentaje + 1, min(101, pct + 1)):
                                     yield f"[PROGRESO] Calibrando Malla IRLS... {p}%\n"
                                 ultimo_porcentaje = pct
                                 
-                        comb_actual += 1
+                        paso_actual += 1
                         
                         if len(coords) < (len(t_samp_reducido) * 0.1): continue
                         
