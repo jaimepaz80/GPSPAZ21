@@ -1565,12 +1565,14 @@ def tab3_calibrar():
             X_b, Y_b, Z_b = geodesicas_a_ecef(lat_b, lon_b, utm_c + h_b)
             X_bg, Y_bg, Z_bg = geodesicas_a_ecef(lat_b, lon_b, utm_c)
 
-            yield f"> [SISTEMA] Iniciando Búsqueda Determinista | {modo_str} (MÓDULOS AISLADOS)...\n"
+            yield f"> [SISTEMA] Iniciando Búsqueda Determinista | {modo_str} (MÓDULOS AISLADOS V16)...\n"
             
-            # --- RUTAS DE EJECUCIÓN ABSOLUTAMENTE AISLADAS SEGÚN EL MÓDULO ---
+            # --- RUTAS DE EJECUCIÓN ABSOLUTAMENTE AISLADAS SEGÚN EL MÓDULO (100% EPOCAS, NO OPTIMIZADO) ---
             
             if modo_str == "MODO_A_CODIGO":
-                # LÓGICA V16 RESTAURADA (Iteración dinámica de gap)
+                # ==============================================================
+                # LÓGICA MÓDULO A V16 (Tolerancia Gap dinámica, 100% de la data)
+                # ==============================================================
                 global_best_score, best_rmse, best_params = float('inf'), float('inf'), {}
                 m_center, m_span, cp_center, cp_span, ca_center, ca_span = 10.0, 5.0, 2.0, 1.5, 2.0, 1.5
                 snr_center, snr_span, gap_center, gap_span = p_snr, 5.0, p_max_gap, 0.02
@@ -1581,7 +1583,7 @@ def tab3_calibrar():
                 rover_tows_full = sorted(list(obs_r_full.keys()))
                 base_tows_full = sorted(list(obs_b_full.keys()))
                 
-                # Pre-scan temporal estático para hallar los límites
+                # Pre-scan temporal estático para hallar los límites (usando solo p_max_gap base)
                 obs_b_pre = {}
                 for tr in rover_tows_full:
                     idx = min(range(len(base_tows_full)), key=lambda i: abs(base_tows_full[i] - tr))
@@ -1592,10 +1594,7 @@ def tab3_calibrar():
                 sd_pre = aislar_diferencias_simples_ppk(obs_b_pre, obs_r_full)
                 if not sd_pre: yield "[CAJA_ERROR] No hay épocas sincronizadas válidas.\n"; return
                 
-                t_pre_full = list(sd_pre.keys())
-                lim_pre = min(30, max(1, int(len(t_pre_full) * 0.30))) 
-                step_pre = len(t_pre_full) // lim_pre if lim_pre > 0 else 1
-                t_pre = t_pre_full[::step_pre][:lim_pre]
+                t_pre = list(sd_pre.keys())
                 
                 coords_pre = []
                 kf_raw = {'X': [[X_bg], [Y_bg], [Z_bg]], 'P': P_init, 'X_base': (X_b, Y_b, Z_b), 'fix_flags': 0, 'h_r': h_r}
@@ -1613,8 +1612,8 @@ def tab3_calibrar():
                 yield f"  [*] Límite Horizontal EKF Inyectado: {f_14(best_eh)} m\n  [*] Límite Vertical EKF Inyectado: {f_14(best_ev)} m\n\n"
                 
                 for nivel in range(p_iter):
-                    pct_base = int((nivel / p_iter) * 100)
-                    yield f"[PROGRESO] CALIBRANDO... Nivel de profundidad {nivel+1}/{p_iter} ({pct_base}%)\n"
+                    # ESTE YIELD ES VITAL PARA QUE EL JAVASCRIPT DE V16 CALCULE EL PORCENTAJE
+                    yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{p_iter})...\n"
                     
                     m_grid = [max(1.0, min(25.0, x)) for x in [m_center - m_span, m_center, m_center + m_span]]
                     cp_grid = [max(0.1, min(5.0, x)) for x in [cp_center - cp_span, cp_center, cp_center + cp_span]]
@@ -1623,8 +1622,10 @@ def tab3_calibrar():
                     gap_grid = [max(0.01, min(0.05, x)) for x in [gap_center - gap_span, gap_center, gap_center + gap_span]]
                     
                     nivel_best_rmse = float('inf')
+                    nivel_best_params = {}
                     
                     for gap in set(gap_grid):
+                        # Sincronización dentro del bucle
                         obs_b_sync = {}
                         for tr in rover_tows_full:
                             idx = min(range(len(base_tows_full)), key=lambda i: abs(base_tows_full[i] - tr))
@@ -1635,10 +1636,7 @@ def tab3_calibrar():
                         sd_suav = aislar_diferencias_simples_ppk(obs_b_sync, obs_r_full)
                         if not sd_suav: continue
                         
-                        t_sample_full = list(sd_suav.keys())
-                        lim = min(30, max(1, int(len(t_sample_full) * 0.30))) 
-                        stp = len(t_sample_full) // lim if lim > 0 else 1
-                        t_samp = t_sample_full[::stp][:lim]
+                        t_samp = list(sd_suav.keys())
                         
                         for m in set(m_grid):
                             for snr in set(snr_grid):
@@ -1661,9 +1659,13 @@ def tab3_calibrar():
                                         
                                         if score < nivel_best_rmse:
                                             nivel_best_rmse = score
+                                            nivel_best_params = {'m': m, 'snr': snr, 'gap': gap, 'cp': cp, 'ca': ca, 'rmse': rmse_3d}
                                             if score < global_best_score:
                                                 global_best_score, best_rmse = score, rmse_3d
                                                 best_params = {'mask': m, 'cp': cp, 'ca': ca, 'eh': best_eh, 'ev': best_ev, 'max_gap': gap, 'snr': snr, 'rmse': rmse_3d, 'ret': ret, 'dn': nf - utm_n_r, 'de': ef - utm_e_r, 'dz': zf - utm_c_r}
+                    
+                    if nivel_best_rmse != float('inf'):
+                        yield f"  [*] Fin Iteración {nivel+1} | Mejor RMSE Local: {f_14(nivel_best_params['rmse'])} m\n"
                     
                     if global_best_score != float('inf'):
                         m_center, m_span = best_params['mask'], m_span / 2.0
@@ -1677,7 +1679,9 @@ def tab3_calibrar():
                 fecha_med = f"{sd_pre[t_pre[0]]['_meta'][0]}-{sd_pre[t_pre[0]]['_meta'][1]:02d}-{sd_pre[t_pre[0]]['_meta'][2]:02d}"
 
             elif modo_str == "MODO_C_PPK":
-                # LÓGICA MÓDULO C
+                # ==============================================================
+                # LÓGICA MÓDULO C (PPK Dual)
+                # ==============================================================
                 global_best_score, best_rmse, best_params = float('inf'), float('inf'), {}
                 m_center, m_span, cp_center, cp_span, ca_center, ca_span = 10.0, 5.0, 2.0, 1.5, 2.0, 1.5
                 snr_center, snr_span, gap_center, gap_span = p_snr, 5.0, p_max_gap, 0.02
@@ -1698,10 +1702,7 @@ def tab3_calibrar():
                 sd_pre = aislar_diferencias_MODO_C(obs_b_pre, obs_r_full)
                 if not sd_pre: yield "[CAJA_ERROR] No hay épocas sincronizadas válidas.\n"; return
                 
-                t_pre_full = list(sd_pre.keys())
-                lim_pre = min(30, max(1, int(len(t_pre_full) * 0.30))) 
-                step_pre = len(t_pre_full) // lim_pre if lim_pre > 0 else 1
-                t_pre = t_pre_full[::step_pre][:lim_pre]
+                t_pre = list(sd_pre.keys())
                 
                 coords_pre = []
                 kf_raw = {'X': [[X_bg], [Y_bg], [Z_bg]], 'P': P_init, 'X_base': (X_b, Y_b, Z_b), 'fix_flags': 0, 'h_r': h_r}
@@ -1719,8 +1720,7 @@ def tab3_calibrar():
                 yield f"  [*] Límite Horizontal EKF Inyectado: {f_14(best_eh)} m\n  [*] Límite Vertical EKF Inyectado: {f_14(best_ev)} m\n\n"
                 
                 for nivel in range(p_iter):
-                    pct_base = int((nivel / p_iter) * 100)
-                    yield f"[PROGRESO] CALIBRANDO... Nivel de profundidad {nivel+1}/{p_iter} ({pct_base}%)\n"
+                    yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{p_iter})...\n"
                     
                     m_grid = [max(1.0, min(25.0, x)) for x in [m_center - m_span, m_center, m_center + m_span]]
                     cp_grid = [max(0.1, min(5.0, x)) for x in [cp_center - cp_span, cp_center, cp_center + cp_span]]
@@ -1729,6 +1729,7 @@ def tab3_calibrar():
                     gap_grid = [max(0.01, min(0.05, x)) for x in [gap_center - gap_span, gap_center, gap_center + gap_span]]
                     
                     nivel_best_rmse = float('inf')
+                    nivel_best_params = {}
                     
                     for gap in set(gap_grid):
                         obs_b_sync = {}
@@ -1741,10 +1742,7 @@ def tab3_calibrar():
                         sd_suav = aislar_diferencias_MODO_C(obs_b_sync, obs_r_full)
                         if not sd_suav: continue
                         
-                        t_sample_full = list(sd_suav.keys())
-                        lim = min(30, max(1, int(len(t_sample_full) * 0.30))) 
-                        stp = len(t_sample_full) // lim if lim > 0 else 1
-                        t_samp = t_sample_full[::stp][:lim]
+                        t_samp = list(sd_suav.keys())
                         
                         for m in set(m_grid):
                             for snr in set(snr_grid):
@@ -1767,9 +1765,13 @@ def tab3_calibrar():
                                         
                                         if score < nivel_best_rmse:
                                             nivel_best_rmse = score
+                                            nivel_best_params = {'m': m, 'snr': snr, 'gap': gap, 'cp': cp, 'ca': ca, 'rmse': rmse_3d}
                                             if score < global_best_score:
                                                 global_best_score, best_rmse = score, rmse_3d
                                                 best_params = {'mask': m, 'cp': cp, 'ca': ca, 'eh': best_eh, 'ev': best_ev, 'max_gap': gap, 'snr': snr, 'rmse': rmse_3d, 'ret': ret, 'dn': nf - utm_n_r, 'de': ef - utm_e_r, 'dz': zf - utm_c_r}
+                    
+                    if nivel_best_rmse != float('inf'):
+                        yield f"  [*] Fin Iteración {nivel+1} | Mejor RMSE Local: {f_14(nivel_best_params['rmse'])} m\n"
                     
                     if global_best_score != float('inf'):
                         m_center, m_span = best_params['mask'], m_span / 2.0
@@ -1783,7 +1785,9 @@ def tab3_calibrar():
                 fecha_med = f"{sd_pre[t_pre[0]]['_meta'][0]}-{sd_pre[t_pre[0]]['_meta'][1]:02d}-{sd_pre[t_pre[0]]['_meta'][2]:02d}"
 
             else:
-                # LÓGICA MÓDULO B (MALLA TRIDIMENSIONAL)
+                # ==============================================================
+                # LÓGICA MÓDULO B V16 (Malla Tridimensional, 100% data)
+                # ==============================================================
                 global_best_score, best_rmse, best_params = float('inf'), float('inf'), {}
                 m_center, m_span, cp_center, cp_span, ca_center, ca_span = 10.0, 5.0, 2.0, 1.5, 2.0, 1.5
                 
@@ -1800,10 +1804,7 @@ def tab3_calibrar():
                 sd_suavizada = aislar_diferencias_MODO_B(obs_b_sync, obs_r_full)
                 if not sd_suavizada: yield "[CAJA_ERROR] No hay épocas sincronizadas válidas.\n"; return
                 
-                t_sample_full = list(sd_suavizada.keys())
-                lim_30 = min(30, max(1, int(len(t_sample_full) * 0.30))) 
-                stp_30 = len(t_sample_full) // lim_30 if lim_30 > 0 else 1
-                t_sample = t_sample_full[::stp_30][:lim_30]
+                t_sample = list(sd_suavizada.keys())
                 
                 coords_raw = []
                 for t in t_sample:
@@ -1821,14 +1822,14 @@ def tab3_calibrar():
                 yield f"  [*] Límite Horizontal IRLS Inyectado: {f_14(best_eh)} m\n  [*] Límite Vertical IRLS Inyectado: {f_14(best_ev)} m\n\n"
                 
                 for nivel in range(p_iter):
-                    pct_base = int((nivel / p_iter) * 100)
-                    yield f"[PROGRESO] CALIBRANDO... Nivel de profundidad {nivel+1}/{p_iter} ({pct_base}%)\n"
+                    yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{p_iter})...\n"
                     
                     m_grid = [max(5.0, min(15.0, x)) for x in [m_center - m_span, m_center, m_center + m_span]]
                     cp_grid = [max(0.1, min(5.0, x)) for x in [cp_center - cp_span, cp_center, cp_center + cp_span]]
                     ca_grid = [max(0.1, min(5.0, x)) for x in [ca_center - ca_span, ca_center, ca_center + ca_span]]
                     
                     nivel_best_rmse = float('inf')
+                    nivel_best_params = {}
                     
                     for m in set(m_grid):
                         coords = []
@@ -1848,9 +1849,13 @@ def tab3_calibrar():
                                 
                                 if rmse_3d < nivel_best_rmse:
                                     nivel_best_rmse = rmse_3d
+                                    nivel_best_params = {'m': m, 'cp': cp, 'ca': ca, 'rmse': rmse_3d}
                                     if rmse_3d < global_best_score:
                                         global_best_score, best_rmse = rmse_3d, rmse_3d
                                         best_params = {'mask': m, 'cp': cp, 'ca': ca, 'eh': best_eh, 'ev': best_ev, 'max_gap': p_max_gap, 'snr': p_snr, 'rmse': rmse_3d, 'ret': ret, 'dn': nf - utm_n_r, 'de': ef - utm_e_r, 'dz': zf - utm_c_r}
+                    
+                    if nivel_best_rmse != float('inf'):
+                        yield f"  [*] Fin Iteración {nivel+1} | Mejor RMSE Local: {f_14(nivel_best_params['rmse'])} m\n"
                     
                     if global_best_score != float('inf'):
                         m_center, m_span = best_params['mask'], m_span / 2.0
@@ -1864,7 +1869,6 @@ def tab3_calibrar():
             
             # --- GUARDADO FINAL COMÚN ---
             if best_rmse != float('inf'):
-                yield f"[PROGRESO] CALIBRANDO... Etapa Finalizada (100%)\n"
                 for k, v in [('opt_mask', best_params['mask']), ('opt_cp', best_params['cp']), ('opt_ca', best_params['ca']), ('opt_max_gap', best_params.get('max_gap', p_max_gap)), ('opt_snr', best_params.get('snr', p_snr)), ('opt_eh', best_params['eh']), ('opt_ev', best_params['ev']), ('opt_bias_n', best_params['dn']), ('opt_bias_e', best_params['de']), ('opt_bias_z', best_params['dz']), ('estrategia_activa', modo_str)]: guardar_estado(k, v)
                 
                 fecha_calculo = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
