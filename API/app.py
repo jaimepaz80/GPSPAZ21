@@ -1894,7 +1894,7 @@ def tab3_calibrar():
                 kf_estado_raw = {'X': [[X_bg], [Y_bg], [Z_bg]], 'P': P_init, 'X_base': (X_b, Y_b, Z_b), 'fix_flags': 0, 'h_r': h_r}
                 coords_raw = []
                 
-                t_sample_fase1 = t_sample[::3]
+                t_sample_fase1 = t_sample[::10]
                 for t in t_sample_fase1:
                     if modo_str == "MODO_A_CODIGO":
                         sem, status, kf_estado_raw, _ = procesar_ekF_lambda(sd_suavizada[t], nav, sp3, kf_estado_raw, t, 10.0, p_snr)
@@ -1936,9 +1936,8 @@ def tab3_calibrar():
                 base_tows_full = sorted(list(obs_b_full.keys()))
                 
                 ultimo_porcentaje = 0
-                paso_actual = 0
                 
-                opt_iter = max(1, min(p_iter, 4))
+                opt_iter = max(1, min(p_iter, 3))
                 
                 for nivel in range(opt_iter):
                     yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{opt_iter})...\n"
@@ -1950,7 +1949,6 @@ def tab3_calibrar():
                     nivel_best_params = {}
                     
                     m_set = list(set(m_grid))
-                    total_ekf_runs_nivel = len(m_set)
                     
                     gap = gap_center
                     snr = snr_center
@@ -1971,12 +1969,11 @@ def tab3_calibrar():
                     t_samp = list(sd_suav.keys())
                     if not sd_suav: continue
                     
-                    t_samp_reducido = t_samp[::3]
+                    t_samp_reducido = t_samp[::10]
                     if not t_samp_reducido: continue
                     epocas_totales = len(t_samp_reducido)
-                    total_pasos_absolutos = opt_iter * total_ekf_runs_nivel * epocas_totales
                     
-                    for m in m_set:
+                    for idx_m, m in enumerate(m_set):
                         kf_est = {'X': [[X_bg], [Y_bg], [Z_bg]], 'P': P_init, 'X_base': (X_b, Y_b, Z_b), 'fix_flags': 0, 'h_r': h_r}
                         coords = []
                         for idx_t, t in enumerate(t_samp_reducido):
@@ -1990,14 +1987,15 @@ def tab3_calibrar():
                                 nt, et = geodesicas_a_utm(la, lo, utm_h)
                                 coords.append((nt, et, al, status))
                                 
-                            paso_incremental = paso_actual * epocas_totales + (idx_t + 1)
-                            pct = int((paso_incremental / max(1, total_pasos_absolutos)) * 100.0)
+                            base_pct = (nivel / opt_iter) * 100.0
+                            m_pct = (idx_m / len(m_set)) * (100.0 / opt_iter)
+                            t_pct = (idx_t / epocas_totales) * ((100.0 / opt_iter) / len(m_set))
+                            
+                            pct = int(base_pct + m_pct + t_pct)
                             if pct > ultimo_porcentaje:
                                 for p in range(ultimo_porcentaje + 1, min(101, pct + 1)):
                                     yield f"[PROGRESO] Calibrando Malla EKF... {p}%\n"
                                 ultimo_porcentaje = pct
-                        
-                        paso_actual += 1
                         
                         if len(coords) < (len(t_samp_reducido) * 0.1): continue
                         
@@ -2052,7 +2050,7 @@ def tab3_calibrar():
                 yield "[PROGRESO] Fase 1: Extracción Límites (Pre-Scan Clásico IRLS)...\n"
                 coords_raw = []
                 
-                t_sample_fase1 = t_sample[::3]
+                t_sample_fase1 = t_sample[::10]
                 for t in t_sample_fase1:
                     sem, status = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, 10.0)
                     if sem:
@@ -2081,9 +2079,8 @@ def tab3_calibrar():
                 ca_center, ca_span = 2.0, 1.5
                 
                 ultimo_porcentaje = 0
-                paso_actual = 0
                 
-                opt_iter = max(1, min(p_iter, 4))
+                opt_iter = max(1, min(p_iter, 3))
                 
                 for nivel in range(opt_iter):
                     yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{opt_iter})...\n"
@@ -2095,14 +2092,12 @@ def tab3_calibrar():
                     nivel_best_params = {}
                     
                     m_set = list(set(m_grid))
-                    total_irls_runs_nivel = len(m_set)
                     
-                    t_samp_reducido = t_sample[::3]
+                    t_samp_reducido = t_sample[::10]
                     if not t_samp_reducido: continue
                     epocas_totales = len(t_samp_reducido)
-                    total_pasos_absolutos = opt_iter * total_irls_runs_nivel * epocas_totales
                     
-                    for m in m_set:
+                    for idx_m, m in enumerate(m_set):
                         coords = []
                         for idx_t, t in enumerate(t_samp_reducido):
                             sem, status = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, m)
@@ -2111,15 +2106,16 @@ def tab3_calibrar():
                                 nt, et = geodesicas_a_utm(la, lo, utm_h)
                                 coords.append((nt, et, al, status))
                                 
-                            paso_incremental = paso_actual * epocas_totales + (idx_t + 1)
-                            pct = int((paso_incremental / max(1, total_pasos_absolutos)) * 100.0)
+                            base_pct = (nivel / opt_iter) * 100.0
+                            m_pct = (idx_m / len(m_set)) * (100.0 / opt_iter)
+                            t_pct = (idx_t / epocas_totales) * ((100.0 / opt_iter) / len(m_set))
+                            
+                            pct = int(base_pct + m_pct + t_pct)
                             if pct > ultimo_porcentaje:
                                 for p in range(ultimo_porcentaje + 1, min(101, pct + 1)):
                                     yield f"[PROGRESO] Calibrando Malla IRLS... {p}%\n"
                                 ultimo_porcentaje = pct
                                 
-                        paso_actual += 1
-                        
                         if len(coords) < (len(t_samp_reducido) * 0.1): continue
                         
                         for cp in set(cp_grid):
