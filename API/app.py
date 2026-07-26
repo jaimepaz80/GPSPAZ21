@@ -1679,7 +1679,7 @@ def tab1_homogenizar():
     guardar_estado('altura_rover', h_r)
     
     if not url_base or not url_rover: 
-        return Response("> [ERROR CRÍTICO] Enlaces de Google Drive faltantes.\n", mimetype='text/plain')
+        return Response("> [ERROR CRÍTICO] Enlaces de Google Drive faltantes.\n", mimetype='text/plain', headers={'X-Accel-Buffering': 'no', 'Cache-Control': 'no-cache'})
     
     p_b_raw = os.path.join(UPLOAD_FOLDER, 'base_raw.obs')
     p_r_raw = os.path.join(UPLOAD_FOLDER, 'rover_calibracion_raw.obs')
@@ -1736,7 +1736,7 @@ def tab1_homogenizar():
             yield generar_informe_homogeneizacion_detallado(name_base, name_rover, base_raw_dict, rover_raw_dict, rover_sinc, modo_str, msg, c_base, c_rover)
             yield "\n[SUCCESS]\n"
         except Exception as e: yield f"\n> [ERROR] Falla estructural: {str(e)}\n"
-    return Response(procesar(), mimetype='text/plain')
+    return Response(procesar(), mimetype='text/plain', headers={'X-Accel-Buffering': 'no', 'Cache-Control': 'no-cache'})
 
 @app.route('/API/tab2_efemerides', methods=['POST'])
 def tab2_efemerides():
@@ -1817,7 +1817,7 @@ def tab2_efemerides():
         except Exception as e:
             yield f"\n> [ERROR FATAL] Fallo en descarga automática NAV: {str(e)}\n"
 
-    return Response(procesar(), mimetype='text/plain')
+    return Response(procesar(), mimetype='text/plain', headers={'X-Accel-Buffering': 'no', 'Cache-Control': 'no-cache'})
 
 @app.route('/API/tab3_calibrar', methods=['POST'])
 def tab3_calibrar():
@@ -1884,7 +1884,8 @@ def tab3_calibrar():
                 kf_estado_raw = {'X': [[X_bg], [Y_bg], [Z_bg]], 'P': P_init, 'X_base': (X_b, Y_b, Z_b), 'fix_flags': 0, 'h_r': h_r}
                 coords_raw = []
                 
-                for t in t_sample:
+                t_sample_fase1 = t_sample[::3]
+                for t in t_sample_fase1:
                     if modo_str == "MODO_A_CODIGO":
                         sem, status, kf_estado_raw, _ = procesar_ekF_lambda(sd_suavizada[t], nav, sp3, kf_estado_raw, t, 10.0, p_snr)
                     else:
@@ -2042,7 +2043,9 @@ def tab3_calibrar():
                 
                 yield "[PROGRESO] Fase 1: Extracción de Límites (Pre-Scan Clásico IRLS)...\n"
                 coords_raw = []
-                for t in t_sample:
+                
+                t_sample_fase1 = t_sample[::3]
+                for t in t_sample_fase1:
                     sem, status = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, 10.0)
                     if sem:
                         la, lo, al = ecef_a_geodesicas(sem[0], sem[1], sem[2])
@@ -2176,7 +2179,7 @@ def tab3_calibrar():
             else:
                 yield "\n> [ERROR] El modelo no convergió. Filtros demasiado agresivos.\n"
         except Exception as e: yield f"\n> [ERROR FATAL] {str(e)}\n"
-    return Response(procesar(), mimetype='text/plain')
+    return Response(procesar(), mimetype='text/plain', headers={'X-Accel-Buffering': 'no', 'Cache-Control': 'no-cache'})
 
 @app.route('/API/tab4_procesar', methods=['POST'])
 def tab4_procesar():
@@ -2200,10 +2203,10 @@ def tab4_procesar():
     url_rover_nuevo = request.form.get('url_rover_nuevo')
     
     if p_mask is None or utm_n is None:
-        return Response("> [ERROR FATAL] Parámetros o coordenadas no encontrados. Ejecute la Pestaña 3 primero.\n", mimetype='text/plain')
+        return Response("> [ERROR FATAL] Parámetros o coordenadas no encontrados. Ejecute la Pestaña 3 primero.\n", mimetype='text/plain', headers={'X-Accel-Buffering': 'no', 'Cache-Control': 'no-cache'})
 
     if not url_rover_nuevo or url_rover_nuevo.strip() == '': 
-        return Response("> [ERROR] Falta el enlace de Drive del nuevo archivo RINEX Rover.\n", mimetype='text/plain')
+        return Response("> [ERROR] Falta el enlace de Drive del nuevo archivo RINEX Rover.\n", mimetype='text/plain', headers={'X-Accel-Buffering': 'no', 'Cache-Control': 'no-cache'})
 
     p_r_nuevo = os.path.join(UPLOAD_FOLDER, 'rover_nuevo_raw.obs')
 
@@ -2368,7 +2371,7 @@ def tab4_procesar():
             yield generar_informe_ascii("MEDICION", p_dict)
             yield "\n[SUCCESS]\n"
         except Exception as e: yield f"\n> [ERROR FATAL] {str(e)}\n"
-    return Response(procesar(), mimetype='text/plain')
+    return Response(procesar(), mimetype='text/plain', headers={'X-Accel-Buffering': 'no', 'Cache-Control': 'no-cache'})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=6000, debug=True)
