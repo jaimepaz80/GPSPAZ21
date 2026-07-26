@@ -1767,10 +1767,10 @@ def tab2_efemerides():
             
             if not os.path.exists(nav_path):
                 urls_to_try = [
+                    f"http://igs.bkg.bund.de/root_ftp/IGS/BRDC/{year}/{doy:03d}/BRDC00IGS_R_{year}{doy:03d}0000_01D_MN.rnx.gz",
                     f"https://garner.ucsd.edu/pub/rinex/{year}/{doy:03d}/brdc{doy:03d}0.{yy}n.gz",
                     f"http://igs.bkg.bund.de/root_ftp/IGS/BRDC/{year}/{doy:03d}/brdc{doy:03d}0.{yy}n.gz",
-                    f"https://www.epncb.oma.be/ftp/obs/BRDC/{year}/{doy:03d}/brdc{doy:03d}0.{yy}n.gz",
-                    f"http://igs.bkg.bund.de/root_ftp/IGS/BRDC/{year}/{doy:03d}/BRDC00IGS_R_{year}{doy:03d}0000_01D_MN.rnx.gz"
+                    f"https://www.epncb.oma.be/ftp/obs/BRDC/{year}/{doy:03d}/brdc{doy:03d}0.{yy}n.gz"
                 ]
                 
                 descargado = False
@@ -1825,6 +1825,7 @@ def tab3_calibrar():
     p_iter = max(1, min(p_iter, 8)) 
 
     def procesar():
+        t_inicio_proceso = datetime.datetime.now()
         try:
             if utm_e == 0.0 or utm_n == 0.0 or utm_n_r == 0.0 or utm_e_r == 0.0: 
                 yield "> [ERROR] Coordenadas Base y Rover no inyectadas correctamente.\n"; return
@@ -1910,6 +1911,8 @@ def tab3_calibrar():
                 rover_tows_full = sorted(list(obs_r_full.keys()))
                 base_tows_full = sorted(list(obs_b_full.keys()))
                 
+                ultimo_porcentaje = 0  # <--- CONTROLADOR GLOBAL DE PROGRESO
+                
                 for nivel in range(p_iter):
                     yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{p_iter})...\n"
                     m_grid = [max(1.0, min(25.0, x)) for x in [m_center - m_span, m_center, m_center + m_span]]
@@ -1921,7 +1924,13 @@ def tab3_calibrar():
                     nivel_best_rmse = float('inf')
                     nivel_best_params = {}
                     
-                    for gap in set(gap_grid):
+                    gap_set = list(set(gap_grid))
+                    m_set = list(set(m_grid))
+                    snr_set = list(set(snr_grid))
+                    comb_totales = max(1, len(gap_set) * len(m_set) * len(snr_set))
+                    comb_actual = 0
+                    
+                    for gap in gap_set:
                         obs_b_sync = {}
                         for tr in rover_tows_full:
                             if not base_tows_full: continue
@@ -1938,11 +1947,15 @@ def tab3_calibrar():
                         t_samp = list(sd_suav.keys())
                         if not sd_suav: continue
                         
-                        for m in set(m_grid):
-                            for snr in set(snr_grid):
+                        t_samp_reducido = t_samp[::3]
+                        if not t_samp_reducido: continue
+                        epocas_totales = len(t_samp_reducido)
+                        
+                        for m in m_set:
+                            for snr in snr_set:
                                 kf_est = {'X': [[X_bg], [Y_bg], [Z_bg]], 'P': P_init, 'X_base': (X_b, Y_b, Z_b), 'fix_flags': 0, 'h_r': h_r}
                                 coords = []
-                                for t in t_samp:
+                                for idx_t, t in enumerate(t_samp_reducido):
                                     if modo_str == "MODO_A_CODIGO":
                                         sem, status, kf_est, _ = procesar_ekF_lambda(sd_suav[t], nav, sp3, kf_est, t, m, snr)
                                     else:
@@ -1952,8 +1965,18 @@ def tab3_calibrar():
                                         la, lo, al = ecef_a_geodesicas(sem[0], sem[1], sem[2])
                                         nt, et = geodesicas_a_utm(la, lo, utm_h)
                                         coords.append((nt, et, al, status))
+                                        
+                                    # <--- LÓGICA DE PROGRESO INYECTADA (SIN BRINCOS) --->
+                                    progreso_actual = ((nivel + (comb_actual + (idx_t + 1) / epocas_totales) / comb_totales) / p_iter) * 100.0
+                                    pct = int(progreso_actual)
+                                    if pct > ultimo_porcentaje:
+                                        for p in range(ultimo_porcentaje + 1, min(101, pct + 1)):
+                                            yield f"[PROGRESO] Calibrando Malla EKF... {p}%\n"
+                                        ultimo_porcentaje = pct
                                 
-                                if len(coords) < (len(t_samp) * 0.1): continue
+                                comb_actual += 1
+                                
+                                if len(coords) < (len(t_samp_reducido) * 0.1): continue
                                 
                                 for cp in set(cp_grid):
                                     for ca in set(ca_grid):
@@ -2034,6 +2057,8 @@ def tab3_calibrar():
                 cp_center, cp_span = 2.0, 1.5
                 ca_center, ca_span = 2.0, 1.5
                 
+                ultimo_porcentaje = 0  # <--- CONTROLADOR GLOBAL DE PROGRESO
+                
                 for nivel in range(p_iter):
                     yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{p_iter})...\n"
                     m_grid = [max(5.0, min(15.0, x)) for x in [m_center - m_span, m_center, m_center + m_span]]
@@ -2043,16 +2068,34 @@ def tab3_calibrar():
                     nivel_best_rmse = float('inf')
                     nivel_best_params = {}
                     
-                    for m in set(m_grid):
+                    m_set = list(set(m_grid))
+                    comb_totales = max(1, len(m_set))
+                    comb_actual = 0
+                    
+                    for m in m_set:
                         coords = []
-                        for t in t_sample:
+                        t_samp_reducido = t_sample[::3]
+                        if not t_samp_reducido: continue
+                        epocas_totales = len(t_samp_reducido)
+                        
+                        for idx_t, t in enumerate(t_samp_reducido):
                             sem, status = calcular_IRLS_MODO_B(sd_suavizada[t], nav, X_b, Y_b, Z_b, t, m)
                             if sem:
                                 la, lo, al = ecef_a_geodesicas(sem[0], sem[1], sem[2])
                                 nt, et = geodesicas_a_utm(la, lo, utm_h)
                                 coords.append((nt, et, al, status))
+                                
+                            # <--- LÓGICA DE PROGRESO INYECTADA (SIN BRINCOS) --->
+                            progreso_actual = ((nivel + (comb_actual + (idx_t + 1) / epocas_totales) / comb_totales) / p_iter) * 100.0
+                            pct = int(progreso_actual)
+                            if pct > ultimo_porcentaje:
+                                for p in range(ultimo_porcentaje + 1, min(101, pct + 1)):
+                                    yield f"[PROGRESO] Calibrando Malla IRLS... {p}%\n"
+                                ultimo_porcentaje = pct
+                                
+                        comb_actual += 1
                         
-                        if len(coords) < (len(t_sample) * 0.1): continue
+                        if len(coords) < (len(t_samp_reducido) * 0.1): continue
                         
                         for cp in set(cp_grid):
                             for ca in set(ca_grid):
@@ -2095,11 +2138,13 @@ def tab3_calibrar():
                 guardar_estado('estrategia_activa', modo_str)
                 
                 fecha_calculo = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                duracion_segundos = (datetime.datetime.now() - t_inicio_proceso).total_seconds()
 
                 yield "\n========================================================\n"
                 yield f"      [INFORME] PARÁMETROS ÓPTIMOS ({modo_str})\n"
                 yield "========================================================\n"
                 yield f"  [-] Fecha y Hora de Cálculo: {fecha_calculo}\n"
+                yield f"  [-] Tiempo de Calibración  : {duracion_segundos:.2f} segundos\n"
                 yield f"  [-] Coord. Base Fija (N,E,Z): {f_14(utm_n)}, {f_14(utm_e)}, {f_14(utm_c)}\n"
                 yield f"  [-] Coord. Rover Cal (N,E,Z): {f_14(utm_n_r)}, {f_14(utm_e_r)}, {f_14(utm_c_r)}\n"
                 yield "--------------------------------------------------------\n"
@@ -2316,3 +2361,4 @@ def tab4_procesar():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=6000, debug=True)
+
