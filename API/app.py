@@ -1867,10 +1867,7 @@ def tab3_calibrar():
                     sd_suavizada = aislar_diferencias_MODO_C(obs_b_raw, obs_r_raw)
                     
                 if not sd_suavizada: yield "> [ERROR] No hay épocas sincronizadas válidas.\n"; return
-                
-                t_sample_full = list(sd_suavizada.keys())
-                step_pre = max(1, len(t_sample_full) // 15)
-                t_sample_pre = t_sample_full[::step_pre][:15]
+                t_sample = list(sd_suavizada.keys())
                 
                 yield "[PROGRESO] Fase 1: Extracción de Límites (Pre-Scan EKF)...\n"
                 P_init = matid(3)
@@ -1878,7 +1875,7 @@ def tab3_calibrar():
                 kf_estado_raw = {'X': [[X_bg], [Y_bg], [Z_bg]], 'P': P_init, 'X_base': (X_b, Y_b, Z_b), 'fix_flags': 0, 'h_r': h_r}
                 coords_raw = []
                 
-                for t in t_sample_pre:
+                for t in t_sample:
                     if modo_str == "MODO_A_CODIGO":
                         sem, status, kf_estado_raw, _ = procesar_ekF_lambda(sd_suavizada[t], nav, sp3, kf_estado_raw, t, 10.0, p_snr)
                     else:
@@ -1919,10 +1916,7 @@ def tab3_calibrar():
                 base_tows_full = sorted(list(obs_b_full.keys()))
                 
                 for nivel in range(p_iter):
-                    target_epochs = 15 + int((nivel / max(1, p_iter - 1)) * 35)
-                    target_epochs = min(50, target_epochs)
-                    
-                    yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{p_iter} | {target_epochs} Épocas)...\n"
+                    yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{p_iter})...\n"
                     m_grid = [max(1.0, min(25.0, x)) for x in [m_center - m_span, m_center, m_center + m_span]]
                     cp_grid = [max(0.1, min(5.0, x)) for x in [cp_center - cp_span, cp_center, cp_center + cp_span]]
                     ca_grid = [max(0.1, min(5.0, x)) for x in [ca_center - ca_span, ca_center, ca_center + ca_span]]
@@ -1946,14 +1940,10 @@ def tab3_calibrar():
                         else:
                             sd_suav = aislar_diferencias_MODO_C(obs_b_sync, obs_r_full)
                             
+                        t_samp = list(sd_suav.keys())
                         if not sd_suav: continue
                         
-                        t_samp_full = list(sd_suav.keys())
-                        step_grid = max(1, len(t_samp_full) // target_epochs)
-                        t_samp = t_samp_full[::step_grid][:target_epochs]
-                        
                         for m in set(m_grid):
-                            yield " "
                             for snr in set(snr_grid):
                                 kf_est = {'X': [[X_bg], [Y_bg], [Z_bg]], 'P': P_init, 'X_base': (X_b, Y_b, Z_b), 'fix_flags': 0, 'h_r': h_r}
                                 coords = []
@@ -2018,14 +2008,11 @@ def tab3_calibrar():
 
                 sd_suavizada = aislar_diferencias_MODO_B(obs_b_sync, obs_r_full)
                 if not sd_suavizada: yield "> [ERROR] No hay épocas sincronizadas válidas.\n"; return
-                
-                t_sample_full = list(sd_suavizada.keys())
-                step_pre = max(1, len(t_sample_full) // 15)
-                t_sample_pre = t_sample_full[::step_pre][:15]
+                t_sample = list(sd_suavizada.keys())
                 
                 yield "[PROGRESO] Fase 1: Extracción de Límites (Pre-Scan Clásico IRLS)...\n"
                 coords_raw = []
-                for t in t_sample_pre:
+                for t in t_sample:
                     sem, status = calcular_IRLS_MODO_B(sd_suavizada[t], nav, X_b, Y_b, Z_b, t, 10.0)
                     if sem:
                         la, lo, al = ecef_a_geodesicas(sem[0], sem[1], sem[2])
@@ -2053,13 +2040,7 @@ def tab3_calibrar():
                 ca_center, ca_span = 2.0, 1.5
                 
                 for nivel in range(p_iter):
-                    target_epochs = 15 + int((nivel / max(1, p_iter - 1)) * 35)
-                    target_epochs = min(50, target_epochs)
-                    
-                    step_grid = max(1, len(t_sample_full) // target_epochs)
-                    t_samp_nivel = t_sample_full[::step_grid][:target_epochs]
-                    
-                    yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{p_iter} | {target_epochs} Épocas)...\n"
+                    yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{p_iter})...\n"
                     m_grid = [max(5.0, min(15.0, x)) for x in [m_center - m_span, m_center, m_center + m_span]]
                     cp_grid = [max(0.1, min(5.0, x)) for x in [cp_center - cp_span, cp_center, cp_center + cp_span]]
                     ca_grid = [max(0.1, min(5.0, x)) for x in [ca_center - ca_span, ca_center, ca_center + ca_span]]
@@ -2068,9 +2049,8 @@ def tab3_calibrar():
                     nivel_best_params = {}
                     
                     for m in set(m_grid):
-                        yield " "
                         coords = []
-                        for t in t_samp_nivel:
+                        for t in t_sample:
                             sem, status = calcular_IRLS_MODO_B(sd_suavizada[t], nav, X_b, Y_b, Z_b, t, m)
                             if sem:
                                 la, lo, al = ecef_a_geodesicas(sem[0], sem[1], sem[2])
