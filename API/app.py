@@ -693,10 +693,10 @@ def analizar_calidad_y_senales_rinex(obs_b, obs_r, max_gap_tolerado=0.05):
         return "MODO_C_PPK", ratio_sync, "Doble Frecuencia L1+L5 con Fase detectada en Base y Rover. Enrutando a Módulo C (PPK Dual)."
     
     elif (base_C1 and base_L1) and (rover_C1 and rover_L1):
-        return "MODO_B_FASE", ratio_sync, "Monofrecuencia L1 con Fase Portadora detectada. Enrutando a Módulo B (IRLS) por regla de exclusión de Fase."
+        return "MODO_A_CODIGO", ratio_sync, "Monofrecuencia L1 con Fase Portadora detectada. Enrutando a Módulo A (EKF) para resolución de ambigüedades."
         
     elif base_C1 and rover_C1:
-        return "MODO_A_CODIGO", ratio_sync, "Código Puro (L1) detectado sin observables de Fase válidas. Enrutando a Módulo A (EKF)."
+        return "MODO_B_FASE", ratio_sync, "Código Puro (L1) detectado sin observables de Fase válidas. Enrutando a Módulo B (IRLS) por exclusión geométrica."
         
     else:
         return "MODO_B_ASINCRONO", ratio_sync, "Señales heterogéneas o corruptas. Enrutando a Módulo B (Safe Fallback)."
@@ -1078,7 +1078,7 @@ def procesar_ekF_lambda(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_mask)
 # =====================================================================
 # VÍA 2 -> MÓDULO B: MOTOR IRLS CLÁSICO CON MAREAS SÓLIDAS
 # =====================================================================
-def calcular_IRLS_MODO_B(sd_epoca, nav, X_b, Y_b, Z_b, tr, mask_angle):
+def calcular_IRLS_MODO_B(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle):
     try:
         y_m, m_m, d_m, h_m, mn_m, sec_m = sd_epoca['_meta']
         dx_tide, dy_tide, dz_tide = correccion_mareas_solidas(X_b, Y_b, Z_b, tr, y_m, m_m, d_m)
@@ -1097,7 +1097,20 @@ def calcular_IRLS_MODO_B(sd_epoca, nav, X_b, Y_b, Z_b, tr, mask_angle):
         for s, d in sd_epoca.items():
             if s == '_meta' or d['sd_P'] is None: continue 
             tau = d['pr_r'] / C_LIGHT
-            sp = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), tr-tau), tr-tau, tau, s[0])
+            t_emision = tr - tau
+            sp = None
+            
+            if sp3 and s in sp3:
+                sp3_res = interpolate_sp3(sp3, s, t_emision)
+                if sp3_res:
+                    theta = OMEGA_E * tau
+                    xs = sp3_res[0] * math.cos(theta) + sp3_res[1] * math.sin(theta)
+                    ys = -sp3_res[0] * math.sin(theta) + sp3_res[1] * math.cos(theta)
+                    sp = (xs, ys, sp3_res[2], sp3_res[3])
+                    
+            if not sp:
+                sp = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), t_emision), t_emision, tau, s[0])
+                
             if sp:
                 el_r, az_r = calcular_topocentricas(sp[0], sp[1], sp[2], X_iter, Y_iter, Z_iter)
                 if el_r >= mask_angle:
@@ -1702,7 +1715,7 @@ def tab1_homogenizar():
                     base_sinc[tr]['_meta'] = rover_raw_dict[tr]['_meta']
                     rover_sinc[tr] = rover_raw_dict[tr]
             
-            if not base_sinc: yield "\n> [ERROR FATAL] Cero épocas en común. Revisar rango horario."; return
+            if not base_sinc: yield "\n> [ERROR FATAL] Cero épocas en común. Revisar rango horario.\n"; return
             p_b_h = os.path.join(UPLOAD_FOLDER, 'base_calib_homo.obs')
             p_r_h = os.path.join(UPLOAD_FOLDER, 'rover_calib_homo.obs')
             generar_rinex_sincronizado(p_b_raw, p_b_h, base_sinc)
@@ -1721,8 +1734,8 @@ def tab1_homogenizar():
             c_rover = {'N': utm_n_r, 'E': utm_e_r, 'Z': utm_c_r}
             
             yield generar_informe_homogeneizacion_detallado(name_base, name_rover, base_raw_dict, rover_raw_dict, rover_sinc, modo_str, msg, c_base, c_rover)
-            yield "\n[SUCCESS]"
-        except Exception as e: yield f"\n> [ERROR] Falla estructural: {str(e)}"
+            yield "\n[SUCCESS]\n"
+        except Exception as e: yield f"\n> [ERROR] Falla estructural: {str(e)}\n"
     return Response(procesar(), mimetype='text/plain')
 
 @app.route('/API/tab2_efemerides', methods=['POST'])
@@ -1800,7 +1813,7 @@ def tab2_efemerides():
             
             guardar_estado('nav_path', nav_path)
             guardar_estado('name_nav_file', os.path.basename(nav_path))
-            yield f"  [-] Archivo NAV listo y ensamblado en memoria.\n\n[SUCCESS]"
+            yield f"  [-] Archivo NAV listo y ensamblado en memoria.\n\n[SUCCESS]\n"
         except Exception as e:
             yield f"\n> [ERROR FATAL] Fallo en descarga automática NAV: {str(e)}\n"
 
@@ -1911,7 +1924,7 @@ def tab3_calibrar():
                 rover_tows_full = sorted(list(obs_r_full.keys()))
                 base_tows_full = sorted(list(obs_b_full.keys()))
                 
-                ultimo_porcentaje = 0  # <--- CONTROLADOR GLOBAL DE PROGRESO
+                ultimo_porcentaje = 0
                 
                 for nivel in range(p_iter):
                     yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{p_iter})...\n"
@@ -1966,7 +1979,6 @@ def tab3_calibrar():
                                         nt, et = geodesicas_a_utm(la, lo, utm_h)
                                         coords.append((nt, et, al, status))
                                         
-                                    # <--- LÓGICA DE PROGRESO INYECTADA (SIN BRINCOS) --->
                                     progreso_actual = ((nivel + (comb_actual + (idx_t + 1) / epocas_totales) / comb_totales) / p_iter) * 100.0
                                     pct = int(progreso_actual)
                                     if pct > ultimo_porcentaje:
@@ -2031,7 +2043,7 @@ def tab3_calibrar():
                 yield "[PROGRESO] Fase 1: Extracción de Límites (Pre-Scan Clásico IRLS)...\n"
                 coords_raw = []
                 for t in t_sample:
-                    sem, status = calcular_IRLS_MODO_B(sd_suavizada[t], nav, X_b, Y_b, Z_b, t, 10.0)
+                    sem, status = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, 10.0)
                     if sem:
                         la, lo, al = ecef_a_geodesicas(sem[0], sem[1], sem[2])
                         nt, et = geodesicas_a_utm(la, lo, utm_h)
@@ -2057,7 +2069,7 @@ def tab3_calibrar():
                 cp_center, cp_span = 2.0, 1.5
                 ca_center, ca_span = 2.0, 1.5
                 
-                ultimo_porcentaje = 0  # <--- CONTROLADOR GLOBAL DE PROGRESO
+                ultimo_porcentaje = 0
                 
                 for nivel in range(p_iter):
                     yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{p_iter})...\n"
@@ -2079,13 +2091,12 @@ def tab3_calibrar():
                         epocas_totales = len(t_samp_reducido)
                         
                         for idx_t, t in enumerate(t_samp_reducido):
-                            sem, status = calcular_IRLS_MODO_B(sd_suavizada[t], nav, X_b, Y_b, Z_b, t, m)
+                            sem, status = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, m)
                             if sem:
                                 la, lo, al = ecef_a_geodesicas(sem[0], sem[1], sem[2])
                                 nt, et = geodesicas_a_utm(la, lo, utm_h)
                                 coords.append((nt, et, al, status))
                                 
-                            # <--- LÓGICA DE PROGRESO INYECTADA (SIN BRINCOS) --->
                             progreso_actual = ((nivel + (comb_actual + (idx_t + 1) / epocas_totales) / comb_totales) / p_iter) * 100.0
                             pct = int(progreso_actual)
                             if pct > ultimo_porcentaje:
@@ -2161,10 +2172,10 @@ def tab3_calibrar():
                 yield f"  [*] Deltas Residuales -> N: {f_14(best_params['dn'])}m, E: {f_14(best_params['de'])}m, Z: {f_14(best_params['dz'])}m\n"
                 yield f"  [*] Épocas Retenidas: {best_params['ret']}\n"
                 yield "========================================================\n"
-                yield "\n[SUCCESS]"
+                yield "\n[SUCCESS]\n"
             else:
                 yield "\n> [ERROR] El modelo no convergió. Filtros demasiado agresivos.\n"
-        except Exception as e: yield f"\n> [ERROR FATAL] {str(e)}"
+        except Exception as e: yield f"\n> [ERROR FATAL] {str(e)}\n"
     return Response(procesar(), mimetype='text/plain')
 
 @app.route('/API/tab4_procesar', methods=['POST'])
@@ -2306,7 +2317,7 @@ def tab4_procesar():
                     c += 1
                     if c % max(1, t_eps // 10) == 0: yield f"[PROGRESO] Resolviendo Matrices IRLS DGPS... {int((c / t_eps) * 100)}%\n"
                     
-                    sem, status = calcular_IRLS_MODO_B(sd_suavizada[t], nav, X_b, Y_b, Z_b, t, p_mask)
+                    sem, status = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, p_mask)
                     if sem:
                         la, lo, al = ecef_a_geodesicas(sem[0], sem[1], sem[2])
                         nt, et = geodesicas_a_utm(la, lo, utm_h)
@@ -2355,10 +2366,9 @@ def tab4_procesar():
             
             yield "[PROGRESO] Ajuste Finalizado.\n"
             yield generar_informe_ascii("MEDICION", p_dict)
-            yield "\n[SUCCESS]"
-        except Exception as e: yield f"\n> [ERROR FATAL] {str(e)}"
+            yield "\n[SUCCESS]\n"
+        except Exception as e: yield f"\n> [ERROR FATAL] {str(e)}\n"
     return Response(procesar(), mimetype='text/plain')
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=6000, debug=True)
-
