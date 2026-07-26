@@ -443,26 +443,32 @@
                     
                     // --- EXTRACCIÓN AUTOMÁTICA DE ITERACIONES (Pestaña 1 -> Pestaña 3) ---
                     if (url === '/API/tab1_homogenizar') {
-                        const iterMatch = text.match(/Iteraciones EKF Sugeridas\s*:\s*(\d+)/);
+                        const iterMatch = text.match(/Iteraciones Geométricas Sug:\s*(\d+)/);
                         if (iterMatch && iterMatch[1]) {
                             const iterField = document.getElementById('param_iter');
                             if (iterField) iterField.value = iterMatch[1];
                         }
                     }
 
-                    // --- EXTRACCIÓN DE PROGRESO (Modal Pestaña 3) ---
-                    if (url === '/API/tab3_calibrar' && text.includes('CALIBRANDO')) {
-                        const pctMatch = text.match(/\((\d+)%\)/);
-                        if (pctMatch && pctMatch[1]) {
-                            const pct = parseInt(pctMatch[1]);
-                            progressBar.style.width = pct + '%';
-                            progressText.innerText = pct + '%';
-                            progressStatus.innerText = `Calibrando Malla Multidimensional... ${pct}% completado`;
+                    // --- EXTRACCIÓN DE PROGRESO (Modal Pestaña 3 RESTAURADO A V16) ---
+                    if (url === '/API/tab3_calibrar' && text.includes('Zoom')) {
+                        const zoomMatches = text.match(/Zoom\s+(\d+)\/(\d+)/g);
+                        if (zoomMatches) {
+                            const lastMatch = zoomMatches[zoomMatches.length - 1];
+                            const parts = lastMatch.match(/Zoom\s+(\d+)\/(\d+)/);
+                            if (parts) {
+                                const current = parseInt(parts[1]);
+                                const total = parseInt(parts[2]);
+                                const pct = Math.min(100, Math.round(((current - 1) / total) * 100) + 15);
+                                progressBar.style.width = pct + '%';
+                                progressText.innerText = pct + '%';
+                                progressStatus.innerText = `Refinando nivel de profundidad ${current} de ${total}...`;
+                            }
                         }
                     }
 
-                    // Cierre del modal en caso de Error crítico o fin
-                    if (url === '/API/tab3_calibrar' && text.includes('[ERROR')) {
+                    // Cierre del modal en caso de Error crítico
+                    if (url === '/API/tab3_calibrar' && text.includes('[CAJA_ERROR]')) {
                         modal.classList.add('hidden');
                     }
                     
@@ -497,7 +503,7 @@
                 }
 
             } catch (err) {
-                display.textContent += "\n[ERROR] " + err.message;
+                display.textContent += "\n[CAJA_ERROR] " + err.message;
                 if (url === '/API/tab3_calibrar') modal.classList.add('hidden');
             }
         }
