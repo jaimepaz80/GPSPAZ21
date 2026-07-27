@@ -276,16 +276,14 @@ def parse_rinex_obs_completo(path):
                     obs[tow][line[0:3].strip()] = data
     return obs
 
-def interpolar_base_a_rover(obs_base, tr, max_gap=0.5):
+def interpolar_base_a_rover(obs_base, tr, max_gap=2.0):
     tiempos_base = sorted(list(obs_base.keys()), key=lambda k: obs_base[k].get('_meta', (0,0,0,0,0,0)))
     if not tiempos_base: return None
     
-    # Búsqueda exacta de época coincidente
     exact_idx = min(range(len(tiempos_base)), key=lambda i: abs(tiempos_base[i] - tr))
     if abs(tiempos_base[exact_idx] - tr) <= 1e-3:
         return obs_base[tiempos_base[exact_idx]].copy()
         
-    # Búsqueda de intervalo adyacente para interpolación lineal estricta
     idx_after = 0
     while idx_after < len(tiempos_base) and tiempos_base[idx_after] < tr:
         idx_after += 1
@@ -298,7 +296,7 @@ def interpolar_base_a_rover(obs_base, tr, max_gap=0.5):
     t1 = tiempos_base[idx_after - 1]
     t2 = tiempos_base[idx_after]
     
-    if (t2 - t1) > (max_gap * 2.0):
+    if (t2 - t1) > (max_gap * 4.0):
         if abs(tiempos_base[exact_idx] - tr) <= max_gap:
             return obs_base[tiempos_base[exact_idx]].copy()
         return None
@@ -718,7 +716,6 @@ def analizar_calidad_y_senales_rinex(obs_b, obs_r, modo_hardware="iguales"):
     total_eval = max(len(tows_b), len(tows_r))
     ratio_sync = (sync_epochs / total_eval) if total_eval > 0 else 0.0
     
-    # Análisis forense y robusto de disponibilidad de portadoras L1/L5 reales
     tiene_l5_real = False
     for t in tows_r[:20]:
         for s, d in obs_r[t].items():
@@ -914,11 +911,9 @@ def calcular_IRLS_MODO_B(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom
                 SD_P_calc_i = (rho_i_r_base + iono_i_r) - (rho_i_b_base + iono_i_b)
                 DD_P_calc = SD_P_calc_i - rc['SD_P_calc_ref']
                 
-                # Vector director unitario ECEF para el satélite i y de referencia rc
                 u_i_ecef = [-(data['sp'][0] - X_iter) / dist_i_r, -(data['sp'][1] - Y_iter) / dist_i_r, -(data['sp'][2] - Z_iter) / dist_i_r]
                 u_rc_ecef = [-(rc['sp'][0] - X_iter) / rc['dist_ref_r'], -(rc['sp'][1] - Y_iter) / rc['dist_ref_r'], -(rc['sp'][2] - Z_iter) / rc['dist_ref_r']]
                 
-                # CORRECCIÓN RIGUROSA: Proyección estricta a ENU usando R_enu
                 u_i_enu = multiplicar_matriz_vector_3x3(R_enu, u_i_ecef)
                 u_rc_enu = multiplicar_matriz_vector_3x3(R_enu, u_rc_ecef)
                 
@@ -959,7 +954,6 @@ def calcular_IRLS_MODO_B(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom
             Delta_ENU = matmul(Q, U_vec)
             if not Delta_ENU or len(Delta_ENU) < 3 or not Delta_ENU[0]: return None, "FAILED", None
 
-            # Conversión de corrección ENU a incremento ECEF mediante la transpuesta de R_enu
             dE, dN, dU = Delta_ENU[0][0], Delta_ENU[1][0], Delta_ENU[2][0]
             dX = R_enu[0][0]*dE + R_enu[1][0]*dN + R_enu[2][0]*dU
             dY = R_enu[0][1]*dE + R_enu[1][1]*dN + R_enu[2][1]*dU
@@ -1294,7 +1288,7 @@ def generar_informe_homogeneizacion_detallado(base_name, rover_name, base_raw, r
   [-] Ventana de Medición       : {r_ini_str} al {r_fin_str}
   [-] Duración Neta Solapamiento: {duracion_str} (HH:MM:SS)
 
-[3] MATRIZ RESULTANTE (ESTRICTA, CON INTERPOLACIÓN LINEAL)
+[3] MATRIZ RESULTANTE (ESTRICTA, CON INTERPOLACIÓN DINÁMICA)
   [-] Épocas Útiles Sincronizadas: {es}
   [-] Tasa de Éxito sobre Rover  : {f_14(t_exito)}%
   [-] Iteraciones EKF Sugeridas  : {sug_iter} (Basado en densidad)
@@ -1324,7 +1318,7 @@ def generar_informe_ascii(tipo, p_dict):
     
     informe = f"""
 ========================================================================
-             INFORME DE PROCESAMIENTO GNSSJP PRO (V18)
+             INFORME DE PROCESAMIENTO GNSSJP PRO (V18.1)
 ========================================================================
 
 [*] RESULTADO DE MEDICIÓN ABSOLUTA ({estado_sol})
@@ -1336,7 +1330,7 @@ def generar_informe_ascii(tipo, p_dict):
   [-] Máscara Elevación      : {f_14(p_dict['mask'])}°
   [-] Filtro Planimétrico    : {f_14(p_dict['cp'])} Sigma
   [-] Filtro Altimétrico     : {f_14(p_dict['ca'])} Sigma
-  [-] Tolerancia Sync        : {f_14(p_dict.get('max_gap', 0.5))} s
+  [-] Tolerancia Sync (Dinam): {f_14(p_dict.get('max_gap', 2.0))} s
   [-] Épocas Útiles Retenidas: {p_dict['ret']} ({f_14((p_dict['ret']/float(max(1, p_dict['total'])))*100.0)}% del total)
   [-] Motor Matemático Activo: {p_dict.get('estrategia', 'Desconocido')}
 
@@ -1407,8 +1401,8 @@ def tab1_homogenizar():
     utm_e_r = safe_f(request.form.get('utm_este_r'), 0.0)
     utm_c_r = safe_f(request.form.get('utm_cota_r'), 0.0)
     
-    h_b = safe_f(request.form.get('altura_base'), 0.0)
-    h_r = safe_f(request.form.get('altura_rover'), 0.0)
+    h_b = 0.0 # Altura de antena cero estricta
+    h_r = 0.0 # Altura de antena cero estricta
     modo_hardware = request.form.get('modo_hardware', 'iguales')
 
     guardar_estado('utm_norte', utm_n)
@@ -1451,9 +1445,9 @@ def tab1_homogenizar():
             for tr in sorted(list(rover_raw_dict.keys()), key=lambda k: rover_raw_dict[k].get('_meta', (0,0,0,0,0,0))):
                 c += 1
                 if total_epochs > 0 and c % max(1, total_epochs // 10) == 0: 
-                    yield f"[PROGRESO] Cotejando épocas con interpolación lineal exacta... {int((c / float(total_epochs)) * 100.0)}%\n"
+                    yield f"[PROGRESO] Cotejando épocas con interpolación dinámica flexible (max_gap=2.0s)... {int((c / float(total_epochs)) * 100.0)}%\n"
                 
-                base_interp = interpolar_base_a_rover(base_raw_dict, tr, max_gap=0.5)
+                base_interp = interpolar_base_a_rover(base_raw_dict, tr, max_gap=2.0)
                 
                 if base_interp:
                     base_sinc[tr] = base_interp
@@ -1583,11 +1577,12 @@ def tab3_calibrar():
     utm_n_r = leer_estado('utm_norte_r')
     utm_e_r = leer_estado('utm_este_r')
     utm_c_r = leer_estado('utm_cota_r')
-    h_b = leer_estado('altura_base')
-    h_r = leer_estado('altura_rover')
+    h_b = 0.0
+    h_r = 0.0
     modo_hardware = leer_estado('modo_hardware') or 'iguales'
 
-    p_max_gap = safe_f(request.form.get('param_max_gap'), 0.5)
+    # PROPAGACIÓN DINÁMICA ESTRICTA: El max_gap del formulario se inyecta y respeta
+    p_max_gap = safe_f(request.form.get('param_max_gap'), 2.0)
     p_snr = safe_f(request.form.get('param_snr'), 25.0)
     p_iter = max(1, safe_i(request.form.get('param_iter'), 4))
 
@@ -1623,7 +1618,7 @@ def tab3_calibrar():
 
             geom_cache = {}
 
-            yield f"> [SISTEMA] Iniciando Búsqueda Determinista | {modo_str} (IRLS + ENU)...\n"
+            yield f"> [SISTEMA] Iniciando Búsqueda Determinista | {modo_str} (IRLS + ENU | max_gap={p_max_gap}s)...\n"
             if modo_str == "MODO_D_DGPS": sd_suavizada = aislar_diferencias_MODO_D(obs_b_raw, obs_r_raw)
             else: sd_suavizada = aislar_diferencias_MODO_B(obs_b_raw, obs_r_raw)
             
@@ -1642,8 +1637,8 @@ def tab3_calibrar():
             coords_raw = []
             for t in t_sample:
                 if os.path.exists(flag_file): break
-                if modo_str == "MODO_D_DGPS": sem, status, _ = calcular_IRLS_MODO_D(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, 10.0, geom_cache=geom_cache)
-                else: sem, status, _ = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, 10.0, geom_cache=geom_cache)
+                if modo_str == "MODO_D_DGPS": sem, status, _ = calcular_IRLS_MODO_D(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, 5.0, geom_cache=geom_cache)
+                else: sem, status, _ = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, 5.0, geom_cache=geom_cache)
                 
                 if sem:
                     la, lo, al = ecef_a_geodesicas(sem[0], sem[1], sem[2])
@@ -1667,17 +1662,17 @@ def tab3_calibrar():
             best_rmse = float('inf')
             best_params = {}
             
-            m_center, m_span = 10.0, 5.0
-            cp_center, cp_span = 2.0, 1.5
-            ca_center, ca_span = 2.0, 1.5
+            m_center, m_span = 5.0, 2.5
+            cp_center, cp_span = 2.0, 1.0
+            ca_center, ca_span = 2.0, 1.0
             
             time_out = False
             for nivel in range(p_iter):
                 if time_out or os.path.exists(flag_file): break
                 yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{p_iter})...\n"
-                m_grid = [max(5.0, min(15.0, x)) for x in [m_center - m_span, m_center, m_center + m_span]]
-                cp_grid = [max(0.1, min(5.0, x)) for x in [cp_center - cp_span, cp_center, cp_center + cp_span]]
-                ca_grid = [max(0.1, min(5.0, x)) for x in [ca_center - ca_span, ca_center, ca_center + ca_span]]
+                m_grid = [max(2.0, min(15.0, x)) for x in [m_center - m_span, m_center, m_center + m_span]]
+                cp_grid = [max(0.5, min(5.0, x)) for x in [cp_center - cp_span, cp_center, cp_center + cp_span]]
+                ca_grid = [max(0.5, min(5.0, x)) for x in [ca_center - ca_span, ca_center, ca_center + ca_span]]
                 
                 nivel_best_rmse = float('inf')
                 nivel_best_params = {}
@@ -1758,7 +1753,7 @@ def tab3_calibrar():
                 yield f"  [-] Coord. Base Fija (N,E,Z): {f_14(utm_n)}, {f_14(utm_e)}, {f_14(utm_c)}\n"
                 yield f"  [-] Coord. Rover Cal (N,E,Z): {f_14(utm_n_r)}, {f_14(utm_e_r)}, {f_14(utm_c_r)}\n"
                 yield "--------------------------------------------------------\n"
-                yield f"  [-] Tolerancia Sync (max_gap): {f_14(best_params.get('max_gap', p_max_gap))}\n"
+                yield f"  [-] Tolerancia Sync Dinámica (max_gap): {f_14(best_params.get('max_gap', p_max_gap))}\n"
                 yield f"  [-] Máscara Elevación (°): {f_14(best_params['mask'])}\n"
                 yield f"  [-] Filtro Sigma Plan (cp): {f_14(best_params['cp'])}\n"
                 yield f"  [-] Filtro Sigma Alt (ca): {f_14(best_params['ca'])}\n"
@@ -1782,16 +1777,17 @@ def tab4_procesar():
     utm_c = safe_f(leer_estado('utm_cota'), 0.0)
     utm_h = safe_i(leer_estado('utm_huso'), 19)
     utm_hem = leer_estado('utm_hemisferio') or 'N'
-    h_b = safe_f(leer_estado('altura_base'), 0.0)
-    h_r = safe_f(leer_estado('altura_rover'), 0.0)
+    h_b = 0.0
+    h_r = 0.0
     modo_hardware = leer_estado('modo_hardware') or 'iguales'
     
-    p_mask = safe_f(leer_estado('opt_mask'), 15.0)
+    p_mask = safe_f(leer_estado('opt_mask'), 5.0)
     p_cp = safe_f(leer_estado('opt_cp'), 2.0)
-    p_ca = safe_f(leer_estado('opt_ca'), 0.5)
+    p_ca = safe_f(leer_estado('opt_ca'), 2.0)
     err_hor_max = safe_f(leer_estado('opt_eh'), 0.0)
     err_ver_max = safe_f(leer_estado('opt_ev'), 0.0)
-    p_max_gap = safe_f(leer_estado('opt_max_gap'), 0.5)
+    # RECUPERACIÓN ESTRICTA DEL MAX_GAP DINÁMICO OPTIMIZADO
+    p_max_gap = safe_f(leer_estado('opt_max_gap'), 2.0)
     estrategia = leer_estado('estrategia_activa') or "MODO_D_DGPS"
 
     url_rover_nuevo = request.form.get('url_rover_nuevo')
@@ -1837,8 +1833,8 @@ def tab4_procesar():
             global_pdop = 99.9
             global_lambda = 0.0
 
-            yield f"\n> [SISTEMA] Iniciando Procesamiento Definitivo 100% Épocas | {modo_str} (IRLS + ENU)...\n"
-            yield "[PROGRESO] Extrayendo Observables Diferenciales con interpolación temporal...\n"
+            yield f"\n> [SISTEMA] Iniciando Procesamiento Definitivo 100% Épocas | {modo_str} (IRLS + ENU | max_gap={p_max_gap}s)...\n"
+            yield "[PROGRESO] Extrayendo Observables Diferenciales con interpolación temporal flexible...\n"
             
             rover_tows = sorted(list(obs_r_raw.keys()), key=lambda k: obs_r_raw[k].get('_meta', (0,0,0,0,0,0)))
             obs_b_sync = {}
@@ -1906,7 +1902,7 @@ def tab4_procesar():
                 't_exec': float(exec_time)
             }
             
-            yield "[PROGRESO] Ajuste Vectorial Finalizado.\n"
+            yield "[PROGRESO] Ajuste Vectorial Finalizado con Altura de Antena Cero.\n"
             yield generar_informe_ascii("MEDICION", p_dict)
             yield "\n[SUCCESS]"
         except Exception as e: yield f"\n> [ERROR FATAL] {str(e)}"
