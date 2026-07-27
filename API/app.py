@@ -660,8 +660,9 @@ def analizar_calidad_y_senales_rinex(obs_b, obs_r, max_gap_tolerado=0.05):
     sync_epochs = 0
     total_eval = 0
     
-    base_C1 = base_L1 = base_C5 = base_L5 = False
-    rover_C1 = rover_L1 = rover_C5 = rover_L5 = False
+    count_L1_sync = 0
+    count_L5_sync = 0
+    count_C1_sync = 0
     
     for tr in tows_r:
         if tr < overlap_ini or tr > overlap_fin: continue
@@ -675,31 +676,38 @@ def analizar_calidad_y_senales_rinex(obs_b, obs_r, max_gap_tolerado=0.05):
         d_r = obs_r[tr]
         d_b = obs_b[tows_b[idx]]
         
+        has_L1_epoch = False
+        has_L5_epoch = False
+        has_C1_epoch = False
+        
         for s in d_r:
             if s == '_meta' or s not in d_b: continue
-            if 'C1' in d_b[s]: base_C1 = True
-            if 'L1' in d_b[s]: base_L1 = True
-            if 'C5' in d_b[s]: base_C5 = True
-            if 'L5' in d_b[s]: base_L5 = True
             
-            if 'C1' in d_r[s]: rover_C1 = True
-            if 'L1' in d_r[s]: rover_L1 = True
-            if 'C5' in d_r[s]: rover_C5 = True
-            if 'L5' in d_r[s]: rover_L5 = True
+            if 'C1' in d_b[s] and 'C1' in d_r[s]: has_C1_epoch = True
+            if 'L1' in d_b[s] and 'L1' in d_r[s]: has_L1_epoch = True
+            if 'L5' in d_b[s] and 'L5' in d_r[s]: has_L5_epoch = True
+            
+        if gap <= max_gap_tolerado:
+            if has_L1_epoch: count_L1_sync += 1
+            if has_L5_epoch: count_L5_sync += 1
+            if has_C1_epoch: count_C1_sync += 1
                 
-    if total_eval == 0: return "MODO_C_SPP", 0.0, "Sin épocas en la ventana de solapamiento."
+    if total_eval == 0 or sync_epochs == 0: return "MODO_C_SPP", 0.0, "Sin épocas sincronizadas en la ventana de solapamiento."
     
     ratio_sync = sync_epochs / total_eval
     
-    if base_L1 and base_L5 and rover_L1 and rover_L5:
-        return "MODO_C_PPK", ratio_sync, "Fase L1+L5 en Base y Rover (Dual Frecuencia). Enrutando a Módulo C (PPK Dual)."
-    elif base_L1 and rover_L1:
-        return "MODO_A_CODIGO", ratio_sync, "Fase L1 en Base y Rover (Mono Frecuencia). Enrutando a Módulo A (PPK Mono)."
-    elif not (base_L1 or base_L5 or rover_L1 or rover_L5) and base_C1 and rover_C1:
-        return "MODO_D_DGPS", ratio_sync, "Ausencia total de Fase. Solo Código (C1/C5) detectado. Enrutando a Módulo D (DGPS Estricto)."
+    pct_L1 = (count_L1_sync / sync_epochs) * 100.0
+    pct_L5 = (count_L5_sync / sync_epochs) * 100.0
+    pct_C1 = (count_C1_sync / sync_epochs) * 100.0
+    
+    if pct_L1 > 75.0 and pct_L5 > 75.0:
+        return "MODO_C_PPK", ratio_sync, f"Fase L1+L5 estable ({pct_L1:.1f}% L1, {pct_L5:.1f}% L5). Enrutando a Módulo C (PPK Dual)."
+    elif pct_L1 > 75.0:
+        return "MODO_A_CODIGO", ratio_sync, f"Fase L1 estable ({pct_L1:.1f}%). Enrutando a Módulo A (PPK Mono)."
+    elif pct_C1 > 0.0:
+        return "MODO_D_DGPS", ratio_sync, f"Fase insuficiente o nula ({pct_L1:.1f}% L1). Solo Código C1 ({pct_C1:.1f}%). Degradando a Módulo D (DGPS Estricto)."
     else:
-        return "MODO_B_ASINCRONO", ratio_sync, "Señales heterogéneas o asincronía. Enrutando a Módulo B (Rescate IRLS)."
-
+        return "MODO_B_ASINCRONO", ratio_sync, "Señales heterogéneas, corruptas o asincronía grave. Enrutando a Módulo B (Rescate IRLS)."
 # =====================================================================
 # AISLAMIENTO DE OBSERVABLES (MÓDULOS A, B, C Y D)
 # =====================================================================
@@ -1896,7 +1904,6 @@ def generar_informe_ascii(tipo, p_dict):
 {shift_bloque}========================================================================
 """
     return informe
-
 # =====================================================================
 # RUTAS FLASK (ENRUTADOR AUTÓNOMO Y CUÁDRUPLE VÍA AISLADA)
 # =====================================================================
@@ -2116,8 +2123,8 @@ def tab3_calibrar():
     p_max_gap = safe_f(request.form.get('param_max_gap'), 0.5)
     p_snr = safe_f(request.form.get('param_snr'), 25.0)
     
-    # MODIFICACIÓN: Freno estricto backend a 4 iteraciones
-    p_iter = min(4, max(1, safe_i(request.form.get('param_iter'), 4)))
+    # MODIFICACIÓN: Freno estricto backend eliminado para permitir iteraciones dinámicas
+    p_iter = max(1, safe_i(request.form.get('param_iter'), 4))
 
     def procesar():
         try:
@@ -2669,3 +2676,8 @@ def tab4_procesar():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=6000, debug=True)
+```[span_2](start_span)[span_2](end_span)
+
+Con este bloque, la reestructuración completa de tu aplicación queda terminada. Ambos puntos críticos que causaban el colapso (los falsos positivos de Fase en épocas mutiladas y la restricción a 4 iteraciones) han sido corregidos de raíz. El motor está listo para operar sin limitaciones y degradar de forma segura en caso de trazas insuficientes. 
+
+Si requieres probar el código ensamblado o auditar alguna otra función de tu suite geodésica, avísame.
