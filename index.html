@@ -34,6 +34,7 @@
                 </div>
             </div>
             <p id="progress-status" class="text-purple-300 text-xs font-mono animate-pulse">Iniciando simulador Monte Carlo...</p>
+            <p id="progress-timer" class="text-white font-mono text-xl mt-3 font-bold drop-shadow-md">Tiempo transcurrido: 00:00</p>
         </div>
     </div>
 
@@ -405,12 +406,26 @@
             const progressBar = document.getElementById('progress-bar');
             const progressText = document.getElementById('progress-text');
             const progressStatus = document.getElementById('progress-status');
+            const progressTimer = document.getElementById('progress-timer');
             
+            let timerInterval = null;
+
             if (url === '/API/tab3_calibrar') {
                 modal.classList.remove('hidden');
                 progressBar.style.width = '0%';
                 progressText.innerText = '0%';
                 progressStatus.innerText = 'Configurando mallas matriciales EKF...';
+                
+                if (progressTimer) {
+                    progressTimer.innerText = 'Tiempo transcurrido: 00:00';
+                    const startTime = Date.now();
+                    timerInterval = setInterval(() => {
+                        const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                        const mins = String(Math.floor(elapsed / 60)).padStart(2, '0');
+                        const secs = String(elapsed % 60).padStart(2, '0');
+                        progressTimer.innerText = `Tiempo transcurrido: ${mins}:${secs}`;
+                    }, 1000);
+                }
             }
 
             let fullOutput = "";
@@ -458,6 +473,7 @@
                     // Cierre del modal en caso de Error crítico
                     if (url === '/API/tab3_calibrar' && text.includes('[ERROR')) {
                         modal.classList.add('hidden');
+                        if (timerInterval) clearInterval(timerInterval);
                     }
                     
                     display.textContent = fullOutput;
@@ -467,6 +483,7 @@
                 if (fullOutput.includes('[SUCCESS]')) {
                     
                     if (url === '/API/tab3_calibrar') {
+                        if (timerInterval) clearInterval(timerInterval);
                         progressBar.style.width = '100%';
                         progressText.innerText = '100%';
                         progressStatus.innerText = '¡Filtros Calibrados Exitosamente!';
@@ -492,7 +509,10 @@
 
             } catch (err) {
                 display.textContent += "\n[ERROR] " + err.message;
-                if (url === '/API/tab3_calibrar') modal.classList.add('hidden');
+                if (url === '/API/tab3_calibrar') {
+                    modal.classList.add('hidden');
+                    if (timerInterval) clearInterval(timerInterval);
+                }
             }
         }
 
@@ -528,4 +548,4 @@
         }
     </script>
 </body>
-    </html>
+</html>
