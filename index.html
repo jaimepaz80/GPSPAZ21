@@ -34,7 +34,7 @@
                 </div>
             </div>
             <p id="progress-status" class="text-purple-300 text-xs font-mono animate-pulse">Iniciando simulador Monte Carlo...</p>
-            <p id="progress-timer" class="text-white font-mono text-xl mt-3 font-bold drop-shadow-md">Tiempo transcurrido: 00:00</p>
+            <p id="progress-timer" class="text-white font-mono text-xl mt-3 font-bold drop-shadow-md transition-colors duration-300">Tiempo transcurrido: 00:00 / Límite: 04:15</p>
         </div>
     </div>
 
@@ -417,13 +417,20 @@
                 progressStatus.innerText = 'Configurando mallas matriciales EKF...';
                 
                 if (progressTimer) {
-                    progressTimer.innerText = 'Tiempo transcurrido: 00:00';
+                    progressTimer.innerText = 'Tiempo transcurrido: 00:00 / Límite: 04:15';
+                    progressTimer.classList.remove('text-red-500'); // Reseteo de color
                     const startTime = Date.now();
                     timerInterval = setInterval(() => {
                         const elapsed = Math.floor((Date.now() - startTime) / 1000);
                         const mins = String(Math.floor(elapsed / 60)).padStart(2, '0');
                         const secs = String(elapsed % 60).padStart(2, '0');
-                        progressTimer.innerText = `Tiempo transcurrido: ${mins}:${secs}`;
+                        progressTimer.innerText = `Tiempo transcurrido: ${mins}:${secs} / Límite: 04:15`;
+                        
+                        // Alerta visual de Early Stopping
+                        if (elapsed >= 255) {
+                            progressTimer.classList.add('text-red-500');
+                            progressStatus.innerText = 'Aplicando Early Stopping (Salvando progreso)...';
+                        }
                     }, 1000);
                 }
             }
@@ -470,8 +477,8 @@
                         }
                     }
 
-                    // Cierre del modal en caso de Error crítico
-                    if (url === '/API/tab3_calibrar' && text.includes('[ERROR')) {
+                    // Cierre del modal VIVO en caso de Error crítico usando fullOutput (Blindaje contra fragmentación de chunks)
+                    if (url === '/API/tab3_calibrar' && fullOutput.includes('[ERROR')) {
                         modal.classList.add('hidden');
                         if (timerInterval) clearInterval(timerInterval);
                     }
@@ -480,10 +487,16 @@
                     display.scrollTop = display.scrollHeight;
                 }
 
+                // Cierre ROBUSTO Post-Stream: Evita que el modal quede "dangling"
+                if (url === '/API/tab3_calibrar') {
+                    if (timerInterval) clearInterval(timerInterval);
+                    if (!fullOutput.includes('[SUCCESS]')) {
+                        modal.classList.add('hidden');
+                    }
+                }
+
                 if (fullOutput.includes('[SUCCESS]')) {
-                    
                     if (url === '/API/tab3_calibrar') {
-                        if (timerInterval) clearInterval(timerInterval);
                         progressBar.style.width = '100%';
                         progressText.innerText = '100%';
                         progressStatus.innerText = '¡Filtros Calibrados Exitosamente!';
