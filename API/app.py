@@ -639,47 +639,24 @@ def calcular_posicion_satelite_wgs84(eph, t_emision, tau_vuelo, sys_char='G'):
     return (xs * math.cos(theta) + ys * math.sin(theta), -xs * math.sin(theta) + ys * math.cos(theta), zs, dt_sat)
 
 # =====================================================================
-# ENRUTADOR AUTOMÁTICO SIMPLIFICADO (REGLA CORREGIDA: GAP REAL VS TOLERANCIA)
+# ENRUTADOR AUTOMÁTICO BASADO EN SELECCIÓN DE INTERFAZ DE USUARIO
 # =====================================================================
-def analizar_calidad_y_senales_rinex(obs_b, obs_r, max_gap_tolerado=0.05):
+def analizar_calidad_y_senales_rinex(obs_b, obs_r, modo_hardware="iguales"):
     tows_b = sorted(list(obs_b.keys()), key=lambda k: obs_b[k].get('_meta', (0,0,0,0,0,0)))
     tows_r = sorted(list(obs_r.keys()), key=lambda k: obs_r[k].get('_meta', (0,0,0,0,0,0)))
     
     if not tows_b or not tows_r: return "MODO_D_DGPS", 0.0, "Cero épocas. Archivo vacío o corrupto."
     
-    t_ini_b, t_fin_b = tows_b[0], tows_b[-1]
-    t_ini_r, t_fin_r = tows_r[0], tows_r[-1]
+    sync_epochs = min(len(tows_b), len(tows_r))
+    total_eval = max(len(tows_b), len(tows_r))
+    ratio_sync = (sync_epochs / total_eval) if total_eval > 0 else 0.0
     
-    overlap_ini = max(t_ini_b, t_ini_r)
-    overlap_fin = min(t_fin_b, t_fin_r)
-    
-    if overlap_ini > overlap_fin:
-        return "MODO_D_DGPS", 0.0, "Cero solapamiento temporal entre Base y Rover."
-        
-    sync_epochs = 0
-    total_eval = 0
-    max_observed_gap = 0.0
-    
-    for tr in tows_r:
-        if tr < overlap_ini or tr > overlap_fin: continue
-        total_eval += 1
-        idx = min(range(len(tows_b)), key=lambda i: abs(tows_b[i] - tr))
-        gap = abs(tows_b[idx] - tr)
-        
-        if gap > max_observed_gap:
-            max_observed_gap = gap
-            
-        if gap <= max_gap_tolerado:
-            sync_epochs += 1
-                
-    if total_eval == 0: return "MODO_D_DGPS", 0.0, "Sin épocas evaluadas en la ventana de solapamiento."
-    
-    ratio_sync = sync_epochs / total_eval
-    
-    if max_observed_gap > max_gap_tolerado:
-        return "MODO_B_ASINCRONO", ratio_sync, f"Gap observado ({max_observed_gap:.3f}s) > Tolerancia Configurada ({max_gap_tolerado}s). Enrutando a Módulo B (Asincrónico)."
+    # REGLA DEFINIDA POR EL USUARIO EN LA INTERFAZ:
+    # iguales = MODO_D_DGPS | diferentes = MODO_B_ASINCRONO
+    if modo_hardware == "iguales":
+        return "MODO_D_DGPS", ratio_sync, "Modo seleccionado por interfaz: Teléfonos iguales -> Enrutando a Módulo D (DGPS)."
     else:
-        return "MODO_D_DGPS", ratio_sync, f"Gap observado ({max_observed_gap:.3f}s) <= Tolerancia Configurada ({max_gap_tolerado}s). Enrutando a Módulo D (DGPS)."
+        return "MODO_B_ASINCRONO", ratio_sync, "Modo seleccionado por interfaz: Teléfonos diferentes -> Enrutando a Módulo B (Asincrónico)."
 
 # =====================================================================
 # AISLAMIENTO DE OBSERVABLES (MODO B Y MODO D)
@@ -1360,7 +1337,7 @@ def tab1_homogenizar():
     
     h_b = safe_f(request.form.get('altura_base'), 0.0)
     h_r = safe_f(request.form.get('altura_rover'), 0.0)
-    p_max_gap_form = safe_f(request.form.get('param_max_gap'), 0.5)
+    modo_hardware = request.form.get('modo_hardware', 'iguales')
 
     guardar_estado('utm_norte', utm_n)
     guardar_estado('utm_este', utm_e)
@@ -1372,6 +1349,7 @@ def tab1_homogenizar():
     guardar_estado('utm_cota_r', utm_c_r)
     guardar_estado('altura_base', h_b)
     guardar_estado('altura_rover', h_r)
+    guardar_estado('modo_hardware', modo_hardware)
     
     if not url_base or not url_rover: 
         return Response("> [ERROR CRÍTICO] Enlaces de Google Drive faltantes.\n", mimetype='text/plain')
@@ -1390,8 +1368,8 @@ def tab1_homogenizar():
             base_raw_dict = parse_rinex_obs_completo(p_b_raw)
             rover_raw_dict = parse_rinex_obs_completo(p_r_raw)
             
-            yield "> [ENRUTADOR] Evaluando regla de sincronía geométrica (gap real vs max_gap_tolerado)...\n"
-            modo_str, ratio, msg = analizar_calidad_y_senales_rinex(base_raw_dict, rover_raw_dict, max_gap_tolerado=p_max_gap_form)
+            yield "> [ENRUTADOR] Evaluando selección de interfaz de usuario...\n"
+            modo_str, ratio, msg = analizar_calidad_y_senales_rinex(base_raw_dict, rover_raw_dict, modo_hardware=modo_hardware)
             yield f"  [-] Módulo pre-asignado: {modo_str}\n"
             yield f"  [-] Justificación: {msg}\n\n"
             
@@ -1535,6 +1513,7 @@ def tab3_calibrar():
     utm_c_r = leer_estado('utm_cota_r')
     h_b = leer_estado('altura_base')
     h_r = leer_estado('altura_rover')
+    modo_hardware = leer_estado('modo_hardware') or 'iguales'
 
     p_max_gap = safe_f(request.form.get('param_max_gap'), 0.5)
     p_snr = safe_f(request.form.get('param_snr'), 25.0)
@@ -1564,7 +1543,7 @@ def tab3_calibrar():
             nav = parse_rinex_nav_real(nav_path)
             sp3 = parse_sp3_preciso(sp3_path)
             
-            modo_str, ratio, msg = analizar_calidad_y_senales_rinex(obs_b_raw, obs_r_raw, max_gap_tolerado=p_max_gap)
+            modo_str, ratio, msg = analizar_calidad_y_senales_rinex(obs_b_raw, obs_r_raw, modo_hardware=modo_hardware)
             yield f"> [ENRUTADOR] Análisis completado: {msg}\n"
             
             lat_b, lon_b, _ = utm_a_geodesicas(utm_e, utm_n, utm_h, utm_hem)
@@ -1738,6 +1717,7 @@ def tab4_procesar():
     utm_hem = leer_estado('utm_hemisferio')
     h_b = leer_estado('altura_base')
     h_r = leer_estado('altura_rover')
+    modo_hardware = leer_estado('modo_hardware') or 'iguales'
     
     p_mask = leer_estado('opt_mask')
     p_cp = leer_estado('opt_cp')
@@ -1783,7 +1763,7 @@ def tab4_procesar():
             nav = parse_rinex_nav_real(nav_path)
             sp3 = parse_sp3_preciso(sp3_path)
             
-            modo_str, ratio, msg = analizar_calidad_y_senales_rinex(obs_b_raw, obs_r_raw, max_gap_tolerado=p_max_gap)
+            modo_str, ratio, msg = analizar_calidad_y_senales_rinex(obs_b_raw, obs_r_raw, modo_hardware=modo_hardware)
             yield f"> [ENRUTADOR] Análisis completado: {msg}\n"
             
             lat_b, lon_b, _ = utm_a_geodesicas(utm_e, utm_n, utm_h, utm_hem)
