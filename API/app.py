@@ -29,6 +29,9 @@ os.makedirs(REPORT_FOLDER, exist_ok=True)
 STATE_LOCK = threading.Lock()
 SP3_LOCK = threading.Lock() 
 
+# Variable Global para interrupción controlada de la Caja Negra (Malla EKF/IRLS)
+ESTADO_INTERRUPCION = False
+
 # --- CONSTANTES GEODÉSICAS INMUTABLES ---
 C_LIGHT = 299792458.0
 OMEGA_E = 7.2921151467e-5
@@ -223,6 +226,7 @@ def parse_rinex_obs_completo(path):
                 p = line[1:].split()
                 if len(p) >= 6:
                     y, m, d, h, mn, sec = int(p[0]), int(p[1]), int(p[2]), int(p[3]), int(p[4]), float(p[5])
+                    if y < 100: y += 2000 # [CORRECCIÓN]: Evitar años de 2 dígitos y colapso de TOW
                     tow = round(gps_time_to_tow(y, m, d, h, mn, sec), 6)
                     obs[tow] = {'_meta': (y, m, d, h, mn, sec)}
             elif tow and len(line) > 3 and line[0] in 'GRECSJ':
@@ -261,7 +265,8 @@ def parse_rinex_obs_completo(path):
     return obs
 
 def interpolar_base_a_rover(obs_base, tr, max_gap=0.05):
-    tiempos_base = sorted(list(obs_base.keys()))
+    # [CORRECCIÓN]: Ordenamiento por tiempo absoluto (metadatos) para evitar ruptura en cruces de semana GPS
+    tiempos_base = sorted(list(obs_base.keys()), key=lambda k: obs_base[k].get('_meta', (0,0,0,0,0,0)))
     if not tiempos_base: return None
     idx = min(range(len(tiempos_base)), key=lambda i: abs(tiempos_base[i] - tr))
     if abs(tiempos_base[idx] - tr) <= max_gap:
@@ -291,7 +296,7 @@ def generar_rinex_sincronizado(raw_path, out_path, obs_dict):
             
     with open(out_path, 'w', encoding='utf-8') as f_out:
         for line in header_lines: f_out.write(line)
-        for tow in sorted(obs_dict.keys()):
+        for tow in sorted(obs_dict.keys(), key=lambda k: obs_dict[k].get('_meta', (0,0,0,0,0,0))):
             meta = obs_dict[tow].get('_meta')
             if not meta: continue
             y, m, d, h, mn, sec = meta[0], meta[1], meta[2], meta[3], meta[4], meta[5]
@@ -340,6 +345,7 @@ def parse_sp3_preciso(path):
                 if len(p) >= 7:
                     try:
                         y, m, d, h, mn, s = int(p[1]), int(p[2]), int(p[3]), int(p[4]), int(p[5]), float(p[6])
+                        if y < 100: y += 2000
                         current_time = gps_time_to_tow(y, m, d, h, mn, s)
                     except: pass
             elif line.startswith('P') and current_time:
@@ -451,11 +457,13 @@ def seleccionar_efemeride_optima(eph_list, t_target):
             valid_ephs.append((abs(dt), eph))
     if not valid_ephs: return None
     return min(valid_ephs, key=lambda x: x[0])[1]
+
 # =====================================================================
 # GEODESIA ESPACIAL Y CORRECCIONES ATMOSFÉRICAS
 # =====================================================================
 def correccion_mareas_solidas(X, Y, Z, tow, year, month, day):
     try:
+        if year < 100: year += 2000
         h2, l2 = 0.609, 0.085
         Re = 6378137.0
         GM_earth, GM_sun, GM_moon = 3.986004418e14, 1.327124e20, 4.902801e12
@@ -638,8 +646,8 @@ def calcular_posicion_satelite_wgs84(eph, t_emision, tau_vuelo, sys_char='G'):
 # ENRUTADOR AUTOMÁTICO (5 REGLAS: A, B, C, D Y SPP)
 # =====================================================================
 def analizar_calidad_y_senales_rinex(obs_b, obs_r, max_gap_tolerado=0.05):
-    tows_b = sorted(list(obs_b.keys()))
-    tows_r = sorted(list(obs_r.keys()))
+    tows_b = sorted(list(obs_b.keys()), key=lambda k: obs_b[k].get('_meta', (0,0,0,0,0,0)))
+    tows_r = sorted(list(obs_r.keys()), key=lambda k: obs_r[k].get('_meta', (0,0,0,0,0,0)))
     
     if not tows_b or not tows_r: return "MODO_C_SPP", 0.0, "Cero épocas. Archivo vacío o corrupto."
     
@@ -686,29 +694,21 @@ def analizar_calidad_y_senales_rinex(obs_b, obs_r, max_gap_tolerado=0.05):
     
     ratio_sync = sync_epochs / total_eval
     
-    # REGLA 1 - MODO C (PPK DUAL FRECUENCIA)
     if base_L1 and base_L5 and rover_L1 and rover_L5:
         return "MODO_C_PPK", ratio_sync, "Fase L1+L5 en Base y Rover (Dual Frecuencia). Enrutando a Módulo C (PPK Dual)."
-    
-    # REGLA 2 - MODO A (PPK MONO FRECUENCIA)
     elif base_L1 and rover_L1:
         return "MODO_A_CODIGO", ratio_sync, "Fase L1 en Base y Rover (Mono Frecuencia). Enrutando a Módulo A (PPK Mono)."
-    
-    # REGLA 3 - MODO D (DGPS CÓDIGO PURO ESTRICTO)
     elif not (base_L1 or base_L5 or rover_L1 or rover_L5) and base_C1 and rover_C1:
         return "MODO_D_DGPS", ratio_sync, "Ausencia total de Fase. Solo Código (C1/C5) detectado. Enrutando a Módulo D (DGPS Estricto)."
-        
-    # REGLA 4 - MODO B (ASINCRÓNICO / HETEROGÉNEO)
     else:
         return "MODO_B_ASINCRONO", ratio_sync, "Señales heterogéneas o asincronía. Enrutando a Módulo B (Rescate IRLS)."
 
 # =====================================================================
 # AISLAMIENTO DE OBSERVABLES (MÓDULOS A, B, C Y D)
 # =====================================================================
-# EXTRACTOR EXCLUSIVO MÓDULO A (PPK MONO)
 def aislar_diferencias_simples_ppk(obs_b, obs_r):
     sd_suavizada = {}
-    for tow in sorted(list(obs_r.keys())):
+    for tow in sorted(list(obs_r.keys()), key=lambda k: obs_r[k].get('_meta', (0,0,0,0,0,0))):
         if tow not in obs_b: continue
         
         l1_count, l5_count = 0, 0
@@ -751,10 +751,9 @@ def aislar_diferencias_simples_ppk(obs_b, obs_r):
         if len(sd_epoca) > 2: sd_suavizada[tow] = sd_epoca
     return sd_suavizada
 
-# EXTRACTOR EXCLUSIVO MÓDULO B (IRLS ASINCRÓNICO)
 def aislar_diferencias_MODO_B(obs_b, obs_r):
     sd_suavizada = {}
-    for tow in sorted(list(obs_r.keys())):
+    for tow in sorted(list(obs_r.keys()), key=lambda k: obs_r[k].get('_meta', (0,0,0,0,0,0))):
         if tow not in obs_b: continue
         
         sd_epoca = {'_meta': obs_r[tow]['_meta'], '_tow_b': tow}
@@ -783,10 +782,9 @@ def aislar_diferencias_MODO_B(obs_b, obs_r):
         if len(sd_epoca) > 1: sd_suavizada[tow] = sd_epoca
     return sd_suavizada
 
-# EXTRACTOR EXCLUSIVO MÓDULO C (PPK L1+L5 DUAL)
 def aislar_diferencias_MODO_C(obs_b, obs_r):
     sd_suavizada = {}
-    for tow in sorted(list(obs_r.keys())):
+    for tow in sorted(list(obs_r.keys()), key=lambda k: obs_r[k].get('_meta', (0,0,0,0,0,0))):
         if tow not in obs_b: continue
         
         sd_epoca = {'_meta': obs_r[tow]['_meta'], '_tow_b': tow}
@@ -816,10 +814,9 @@ def aislar_diferencias_MODO_C(obs_b, obs_r):
         if len(sd_epoca) > 2: sd_suavizada[tow] = sd_epoca
     return sd_suavizada
 
-# EXTRACTOR EXCLUSIVO MÓDULO D (DGPS CÓDIGO PURO)
 def aislar_diferencias_MODO_D(obs_b, obs_r):
     sd_suavizada = {}
-    for tow in sorted(list(obs_r.keys())):
+    for tow in sorted(list(obs_r.keys()), key=lambda k: obs_r[k].get('_meta', (0,0,0,0,0,0))):
         if tow not in obs_b: continue
         
         sd_epoca = {'_meta': obs_r[tow]['_meta'], '_tow_b': tow}
@@ -1664,7 +1661,7 @@ def estadistica_desacoplada(coordenadas, conf_plani, conf_alti, err_hor_max, err
 def generar_informe_homogeneizacion_detallado(base_name, rover_name, base_raw, rover_raw, rover_sinc, modo_str, msg, c_base, c_rover, t_exec):
     def get_stats(obs):
         c = {'G':0, 'E':0, 'C':0, 'R':0, 'S':0, 'J':0}
-        tiempos = sorted(list(obs.keys()))
+        tiempos = sorted(list(obs.keys()), key=lambda k: obs[k].get('_meta', (0,0,0,0,0,0)))
         if not tiempos: return c, 0, None, None, 0.0, 0, "Desconocida", 0, 0.0
         
         epocas = len(obs)
@@ -1844,6 +1841,12 @@ def index():
     index_path = os.path.join(base_dir, 'index.html')
     return send_file(index_path)
 
+@app.route('/API/interrumpir', methods=['POST'])
+def interrumpir_proceso():
+    global ESTADO_INTERRUPCION
+    ESTADO_INTERRUPCION = True
+    return Response("Interrumpido", status=200)
+
 @app.route('/API/tab1_homogenizar', methods=['POST'])
 def tab1_homogenizar():
     start_time = time.time()
@@ -1904,12 +1907,13 @@ def tab1_homogenizar():
             base_sinc, rover_sinc = {}, {}
             total_epochs = len(rover_raw_dict)
             c = 0
-            for tr in sorted(list(rover_raw_dict.keys())):
+            for tr in sorted(list(rover_raw_dict.keys()), key=lambda k: rover_raw_dict[k].get('_meta', (0,0,0,0,0,0))):
                 c += 1
                 if total_epochs > 0 and c % max(1, total_epochs // 10) == 0: 
                     yield f"[PROGRESO] Cotejando épocas sin distorsión... {int((c / total_epochs) * 100)}%\n"
                 
-                base_interp = interpolar_base_a_rover(base_raw_dict, tr, max_gap=float('inf'))
+                # [CORRECCIÓN]: Límite racional aplicado en lugar de infinito
+                base_interp = interpolar_base_a_rover(base_raw_dict, tr, max_gap=60.0)
                 
                 if base_interp:
                     base_sinc[tr] = base_interp
@@ -2025,6 +2029,9 @@ def tab2_efemerides():
 
 @app.route('/API/tab3_calibrar', methods=['POST'])
 def tab3_calibrar():
+    global ESTADO_INTERRUPCION
+    ESTADO_INTERRUPCION = False
+    
     start_time = time.time()
     utm_n = leer_estado('utm_norte')
     utm_e = leer_estado('utm_este')
@@ -2043,6 +2050,7 @@ def tab3_calibrar():
     p_iter = max(1, p_iter) 
 
     def procesar():
+        global ESTADO_INTERRUPCION
         try:
             if utm_e == 0.0 or utm_n == 0.0 or utm_n_r == 0.0 or utm_e_r == 0.0: 
                 yield "> [ERROR] Coordenadas Base y Rover no inyectadas correctamente.\n"; return
@@ -2055,7 +2063,6 @@ def tab3_calibrar():
             if not p_b_h or not p_r_h: 
                 yield "> [ERROR FATAL] Faltan archivos RINEX. Ve a la Pestaña 1.\n"; return
                 
-            # BLOQUEO ESTRICTO SP3+NAV
             if not nav_path or not sp3_path:
                 yield "\n> [ERROR CRÍTICO RECHAZADO]\n"
                 yield "  [-] El cálculo geodésico estricto prohíbe el uso de broadcast nav para posicionamiento.\n"
@@ -2091,8 +2098,8 @@ def tab3_calibrar():
                 
                 t_sample_full = list(sd_suavizada.keys())
                 total_eps = len(t_sample_full)
-                step = max(1, total_eps // 300)
-                t_sample = t_sample_full[::step][:300]
+                step = max(1, total_eps // 60)
+                t_sample = t_sample_full[::step][:60] # [CORRECCIÓN]: Reducido de 300 a 60 épocas para estabilizar la carga CPU
                 
                 yield f"[PROGRESO OPTIMIZADOR RENDER] Decimación Dinámica Activa:\n"
                 yield f"  [-] Épocas totales en archivo: {total_eps}\n"
@@ -2105,9 +2112,7 @@ def tab3_calibrar():
                 coords_raw = []
                 
                 for t in t_sample:
-                    if time.time() - start_time > 14.0:
-                        yield "  [!] WATCHDOG ACTIVADO (14s) EN PRE-SCAN. Interrumpiendo...\n"
-                        break
+                    if ESTADO_INTERRUPCION: break
                     if modo_str == "MODO_A_CODIGO":
                         sem, status, kf_estado_raw, _, _ = procesar_ekF_lambda(sd_suavizada[t], nav, sp3, kf_estado_raw, t, 10.0, p_snr)
                     else:
@@ -2118,6 +2123,7 @@ def tab3_calibrar():
                         nt, et = geodesicas_a_utm(la, lo, utm_h)
                         coords_raw.append((nt, et, al, status))
                 
+                if ESTADO_INTERRUPCION: yield "\n[!] Operación interrumpida prematuramente por el operador.\n"
                 if not coords_raw: yield "> [ERROR] Filtro de Kalman colapsado en Pre-Scan.\n"; return
                 
                 deltas_h = sorted([math.hypot(c[0] - utm_n_r, c[1] - utm_e_r) for c in coords_raw])
@@ -2140,9 +2146,8 @@ def tab3_calibrar():
                 snr_center, snr_span = p_snr, 5.0
                 gap_center, gap_span = p_max_gap, 0.02
                 
-                timeout_triggered = False
                 for nivel in range(p_iter):
-                    if timeout_triggered: break
+                    if ESTADO_INTERRUPCION: break
                     yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{p_iter})...\n"
                     m_grid = [max(1.0, min(25.0, x)) for x in [m_center - m_span, m_center, m_center + m_span]]
                     cp_grid = [max(0.1, min(5.0, x)) for x in [cp_center - cp_span, cp_center, cp_center + cp_span]]
@@ -2154,19 +2159,15 @@ def tab3_calibrar():
                     nivel_best_params = {}
                     
                     for gap in set(gap_grid):
-                        if timeout_triggered: break
+                        if ESTADO_INTERRUPCION: break
                         for m in set(m_grid):
-                            if timeout_triggered: break
+                            if ESTADO_INTERRUPCION: break
                             for snr in set(snr_grid):
-                                if timeout_triggered: break
+                                if ESTADO_INTERRUPCION: break
                                 kf_est = {'X': [[X_bg], [Y_bg], [Z_bg]], 'P': P_init, 'X_base': (X_b, Y_b, Z_b), 'fix_flags': 0, 'h_r': h_r}
                                 coords = []
                                 for t in t_sample:
-                                    if time.time() - start_time > 14.0:
-                                        if not timeout_triggered:
-                                            yield f"  [!] WATCHDOG ACTIVADO (14s) EN NÚCLEO EKF. Aplicando Early Stopping...\n"
-                                            timeout_triggered = True
-                                        break
+                                    if ESTADO_INTERRUPCION: break
                                     if modo_str == "MODO_A_CODIGO":
                                         sem, status, kf_est, _, _ = procesar_ekF_lambda(sd_suavizada[t], nav, sp3, kf_est, t, m, snr)
                                     else:
@@ -2177,7 +2178,7 @@ def tab3_calibrar():
                                         nt, et = geodesicas_a_utm(la, lo, utm_h)
                                         coords.append((nt, et, al, status))
                                 
-                                if not coords: continue # EARLY STOPPING (Poda algorítmica)
+                                if not coords: continue
                                 
                                 for cp in set(cp_grid):
                                     for ca in set(ca_grid):
@@ -2220,8 +2221,8 @@ def tab3_calibrar():
                 
                 t_sample_full = list(sd_suavizada.keys())
                 total_eps = len(t_sample_full)
-                step = max(1, total_eps // 300)
-                t_sample = t_sample_full[::step][:300]
+                step = max(1, total_eps // 60)
+                t_sample = t_sample_full[::step][:60]
                 
                 yield f"[PROGRESO OPTIMIZADOR RENDER] Decimación Dinámica Activa:\n"
                 yield f"  [-] Épocas totales en archivo: {total_eps}\n"
@@ -2230,9 +2231,7 @@ def tab3_calibrar():
                 yield "[PROGRESO] Fase 1: Extracción de Límites (Pre-Scan Clásico IRLS)...\n"
                 coords_raw = []
                 for t in t_sample:
-                    if time.time() - start_time > 14.0:
-                        yield "  [!] WATCHDOG ACTIVADO (14s) EN PRE-SCAN IRLS. Interrumpiendo...\n"
-                        break
+                    if ESTADO_INTERRUPCION: break
                     if modo_str == "MODO_D_DGPS": sem, status, _ = calcular_IRLS_MODO_D(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, 10.0)
                     else: sem, status, _ = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, 10.0)
                     
@@ -2241,6 +2240,7 @@ def tab3_calibrar():
                         nt, et = geodesicas_a_utm(la, lo, utm_h)
                         coords_raw.append((nt, et, al, status))
                 
+                if ESTADO_INTERRUPCION: yield "\n[!] Operación interrumpida prematuramente por el operador.\n"
                 if not coords_raw: yield "> [ERROR] Nube de puntos bruta colapsada en Pre-Scan.\n"; return
                 
                 deltas_h = sorted([math.hypot(c[0] - utm_n_r, c[1] - utm_e_r) for c in coords_raw])
@@ -2261,9 +2261,8 @@ def tab3_calibrar():
                 cp_center, cp_span = 2.0, 1.5
                 ca_center, ca_span = 2.0, 1.5
                 
-                timeout_triggered = False
                 for nivel in range(p_iter):
-                    if timeout_triggered: break
+                    if ESTADO_INTERRUPCION: break
                     yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{p_iter})...\n"
                     m_grid = [max(5.0, min(15.0, x)) for x in [m_center - m_span, m_center, m_center + m_span]]
                     cp_grid = [max(0.1, min(5.0, x)) for x in [cp_center - cp_span, cp_center, cp_center + cp_span]]
@@ -2273,14 +2272,10 @@ def tab3_calibrar():
                     nivel_best_params = {}
                     
                     for m in set(m_grid):
-                        if timeout_triggered: break
+                        if ESTADO_INTERRUPCION: break
                         coords = []
                         for t in t_sample:
-                            if time.time() - start_time > 14.0:
-                                if not timeout_triggered:
-                                    yield f"  [!] WATCHDOG ACTIVADO (14s) EN NÚCLEO IRLS. Aplicando Early Stopping y rescatando datos...\n"
-                                    timeout_triggered = True
-                                break
+                            if ESTADO_INTERRUPCION: break
                             if modo_str == "MODO_D_DGPS": sem, status, _ = calcular_IRLS_MODO_D(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, m)
                             else: sem, status, _ = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, m)
                             
@@ -2289,7 +2284,7 @@ def tab3_calibrar():
                                 nt, et = geodesicas_a_utm(la, lo, utm_h)
                                 coords.append((nt, et, al, status))
                         
-                        if not coords: continue # EARLY STOPPING
+                        if not coords: continue
                         
                         for cp in set(cp_grid):
                             for ca in set(ca_grid):
@@ -2333,6 +2328,9 @@ def tab3_calibrar():
                 
                 fecha_calculo = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 t_exec_script = time.time() - start_time
+
+                if ESTADO_INTERRUPCION:
+                    yield "\n> [SISTEMA] EL OPERADOR HA FORZADO LA DETENCIÓN. PROCEDIENDO A EXTRAER EL MEJOR DATO RECOPILADO...\n"
 
                 yield "\n========================================================\n"
                 yield f"      [INFORME] PARÁMETROS ÓPTIMOS ({modo_str})\n"
@@ -2404,7 +2402,6 @@ def tab4_procesar():
             if not p_b_raw or not os.path.exists(p_b_raw): 
                 yield "> [ERROR FATAL] Falta archivo RINEX Base original.\n"; return
                 
-            # BLOQUEO ESTRICTO SP3+NAV
             if not nav_path or not sp3_path:
                 yield "\n> [ERROR CRÍTICO RECHAZADO]\n"
                 yield "  [-] El cálculo geodésico estricto prohíbe el uso de broadcast nav para posicionamiento.\n"
@@ -2434,8 +2431,8 @@ def tab4_procesar():
                 yield f"\n> [SISTEMA] Iniciando Procesamiento Definitivo 100% Épocas | {modo_str}...\n"
                 yield "[PROGRESO] Órbitas Precisas SP3 acopladas con éxito...\n"
                 
-                rover_tows = sorted(list(obs_r_raw.keys()))
-                base_tows = sorted(list(obs_b_raw.keys()))
+                rover_tows = sorted(list(obs_r_raw.keys()), key=lambda k: obs_r_raw[k].get('_meta', (0,0,0,0,0,0)))
+                base_tows = sorted(list(obs_b_raw.keys()), key=lambda k: obs_b_raw[k].get('_meta', (0,0,0,0,0,0)))
                 obs_b_sync = {}
                 for tr in rover_tows:
                     if not base_tows: continue
@@ -2478,7 +2475,7 @@ def tab4_procesar():
                 if not fwd_states: yield "\n> [ERROR] Colapso total del Filtro Kalman.\n"; return
                 
                 global_lambda = sum(lambda_ratios_list) / max(1, len(lambda_ratios_list))
-                global_pdop = 1.2 # Asumido ideal para EKF Fixed
+                global_pdop = 1.2 
                 
                 yield "[PROGRESO] Fase 2: Aplicando Suavizador RTS Bidireccional...\n"
                 sm_states = suavizador_rts_backward(fwd_states)
@@ -2497,8 +2494,8 @@ def tab4_procesar():
                 yield f"\n> [SISTEMA] Iniciando Procesamiento Definitivo 100% Épocas | {modo_str} (IRLS)...\n"
                 yield "[PROGRESO] Extrayendo Observables Diferenciales...\n"
                 
-                rover_tows = sorted(list(obs_r_raw.keys()))
-                base_tows = sorted(list(obs_b_raw.keys()))
+                rover_tows = sorted(list(obs_r_raw.keys()), key=lambda k: obs_r_raw[k].get('_meta', (0,0,0,0,0,0)))
+                base_tows = sorted(list(obs_b_raw.keys()), key=lambda k: obs_b_raw[k].get('_meta', (0,0,0,0,0,0)))
                 obs_b_sync = {}
                 for tr in rover_tows:
                     if not base_tows: continue
