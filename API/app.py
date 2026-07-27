@@ -639,7 +639,7 @@ def calcular_posicion_satelite_wgs84(eph, t_emision, tau_vuelo, sys_char='G'):
     return (xs * math.cos(theta) + ys * math.sin(theta), -xs * math.sin(theta) + ys * math.cos(theta), zs, dt_sat)
 
 # =====================================================================
-# ENRUTADOR AUTOMÁTICO SIMPLIFICADO (REGLA ÚNICA MAX_GAP > 0.05)
+# ENRUTADOR AUTOMÁTICO SIMPLIFICADO (REGLA CORREGIDA: GAP REAL VS TOLERANCIA)
 # =====================================================================
 def analizar_calidad_y_senales_rinex(obs_b, obs_r, max_gap_tolerado=0.05):
     tows_b = sorted(list(obs_b.keys()), key=lambda k: obs_b[k].get('_meta', (0,0,0,0,0,0)))
@@ -676,12 +676,12 @@ def analizar_calidad_y_senales_rinex(obs_b, obs_r, max_gap_tolerado=0.05):
     
     ratio_sync = sync_epochs / total_eval
     
-    # REGLA ÚNICA SOLICITADA:
-    # Si max_gap_tolerado > 0.05 (o evaluando el desfase temporal efectivo entre archivos), enruta a MODO_B_ASINCRONO, de lo contrario MODO_D_DGPS.
-    if max_gap_tolerado > 0.05:
-        return "MODO_B_ASINCRONO", ratio_sync, f"Gap tolerado configurado ({max_gap_tolerado}s) > 0.05s. Enrutando a Módulo B (Asincrónico)."
+    # REGLA CORREGIDA: Si el desfase real observado (max_observed_gap) es mayor al umbral de 0.05s, 
+    # o si supera el max_gap_tolerado configurado, enruta a MODO_B_ASINCRONO. De lo contrario, MODO_D_DGPS.
+    if max_observed_gap > 0.05:
+        return "MODO_B_ASINCRONO", ratio_sync, f"Gap observado ({max_observed_gap:.3f}s) > 0.05s. Enrutando a Módulo B (Asincrónico)."
     else:
-        return "MODO_D_DGPS", ratio_sync, f"Gap tolerado configurado ({max_gap_tolerado}s) <= 0.05s. Enrutando a Módulo D (DGPS)."
+        return "MODO_D_DGPS", ratio_sync, f"Gap observado ({max_observed_gap:.3f}s) <= 0.05s. Enrutando a Módulo D (DGPS)."
 
 # =====================================================================
 # AISLAMIENTO DE OBSERVABLES (MODO B Y MODO D)
@@ -1390,8 +1390,9 @@ def tab1_homogenizar():
             base_raw_dict = parse_rinex_obs_completo(p_b_raw)
             rover_raw_dict = parse_rinex_obs_completo(p_r_raw)
             
-            yield "> [ENRUTADOR] Evaluando regla de sincronía geométrica (max_gap > 0.05)...\n"
-            modo_str, ratio, msg = analizar_calidad_y_senales_rinex(base_raw_dict, rover_raw_dict, max_gap_tolerado=0.5)
+            p_max_gap_form = safe_f(request.form.get('param_max_gap'), 0.5)
+            yield "> [ENRUTADOR] Evaluando regla de sincronía geométrica (gap real vs max_gap_tolerado)...\n"
+            modo_str, ratio, msg = analizar_calidad_y_senales_rinex(base_raw_dict, rover_raw_dict, max_gap_tolerado=p_max_gap_form)
             yield f"  [-] Módulo pre-asignado: {modo_str}\n"
             yield f"  [-] Justificación: {msg}\n\n"
             
