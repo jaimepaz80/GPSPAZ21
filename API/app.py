@@ -100,7 +100,7 @@ def descargar_desde_gdrive(url, filepath):
     return True
 
 # =====================================================================
-# ÁLGEBRA LINEAL DE ESTADO SÓLIDO (INDEPENDIENTE DE MÓDULOS)
+# ÁLGEBRA LINEAL Y TRANSFORMACIONES GEODÉSICAS RIGUROSAS (ENUR)
 # =====================================================================
 def transpose_matrix(M):
     if not M or not M[0]: return []
@@ -184,8 +184,26 @@ def invert_matrix_nxn(M):
     except:
         return gauss_jordan_inverse(M)
 
+def obtener_matriz_rotacion_enu(lat_deg, lon_deg):
+    lat_r = math.radians(lat_deg)
+    lon_r = math.radians(lon_deg)
+    sin_lat, cos_lat = math.sin(lat_r), math.cos(lat_r)
+    sin_lon, cos_lon = math.sin(lon_r), math.cos(lon_r)
+    return [
+        [-sin_lon,             cos_lon,             0.0     ],
+        [-sin_lat * cos_lon,  -sin_lat * sin_lon,   cos_lat ],
+        [cos_lat * cos_lon,    cos_lat * sin_lon,   sin_lat ]
+    ]
+
+def multiplicar_matriz_vector_3x3(R, v):
+    return [
+        R[0][0]*v[0] + R[0][1]*v[1] + R[0][2]*v[2],
+        R[1][0]*v[0] + R[1][1]*v[1] + R[1][2]*v[2],
+        R[2][0]*v[0] + R[2][1]*v[1] + R[2][2]*v[2]
+    ]
+
 # =====================================================================
-# PARSERS Y GESTIÓN DE ARCHIVOS
+# PARSERS Y GESTIÓN DE ARCHIVOS CON INTERPOLACIÓN TEMPORAL EXACTA
 # =====================================================================
 def parse_rinex_obs_completo(path):
     obs = {}
@@ -258,12 +276,64 @@ def parse_rinex_obs_completo(path):
                     obs[tow][line[0:3].strip()] = data
     return obs
 
-def interpolar_base_a_rover(obs_base, tr, max_gap=0.05):
+def interpolar_base_a_rover(obs_base, tr, max_gap=0.5):
     tiempos_base = sorted(list(obs_base.keys()), key=lambda k: obs_base[k].get('_meta', (0,0,0,0,0,0)))
     if not tiempos_base: return None
-    idx = min(range(len(tiempos_base)), key=lambda i: abs(tiempos_base[i] - tr))
-    if abs(tiempos_base[idx] - tr) <= max_gap:
-        return obs_base[tiempos_base[idx]].copy()
+    
+    # Búsqueda exacta de época coincidente
+    exact_idx = min(range(len(tiempos_base)), key=lambda i: abs(tiempos_base[i] - tr))
+    if abs(tiempos_base[exact_idx] - tr) <= 1e-3:
+        return obs_base[tiempos_base[exact_idx]].copy()
+        
+    # Búsqueda de intervalo adyacente para interpolación lineal estricta
+    idx_after = 0
+    while idx_after < len(tiempos_base) and tiempos_base[idx_after] < tr:
+        idx_after += 1
+        
+    if idx_after == 0 or idx_after >= len(tiempos_base):
+        if abs(tiempos_base[exact_idx] - tr) <= max_gap:
+            return obs_base[tiempos_base[exact_idx]].copy()
+        return None
+        
+    t1 = tiempos_base[idx_after - 1]
+    t2 = tiempos_base[idx_after]
+    
+    if (t2 - t1) > (max_gap * 2.0):
+        if abs(tiempos_base[exact_idx] - tr) <= max_gap:
+            return obs_base[tiempos_base[exact_idx]].copy()
+        return None
+        
+    factor = (tr - t1) / (t2 - t1)
+    obs_t1 = obs_base[t1]
+    obs_t2 = obs_base[t2]
+    
+    obs_interp = {'_meta': obs_t1.get('_meta')}
+    sats_comunes = set(obs_t1.keys()).intersection(set(obs_t2.keys()))
+    sats_comunes.discard('_meta')
+    
+    for s in sats_comunes:
+        obs_interp[s] = {}
+        for key_obs in ['C1', 'C5', 'L1', 'L5']:
+            if key_obs in obs_t1[s] and key_obs in obs_t2[s]:
+                v1 = obs_t1[s][key_obs]
+                v2 = obs_t2[s][key_obs]
+                obs_interp[s][key_obs] = v1 + factor * (v2 - v1)
+            elif key_obs in obs_t1[s]:
+                obs_interp[s][key_obs] = obs_t1[s][key_obs]
+            elif key_obs in obs_t2[s]:
+                obs_interp[s][key_obs] = obs_t2[s][key_obs]
+                
+        for key_snr in ['S1', 'S5']:
+            if key_snr in obs_t1[s]:
+                obs_interp[s][key_snr] = obs_t1[s][key_snr]
+            elif key_snr in obs_t2[s]:
+                obs_interp[s][key_snr] = obs_t2[s][key_snr]
+                
+    if len(obs_interp) > 1:
+        return obs_interp
+        
+    if abs(tiempos_base[exact_idx] - tr) <= max_gap:
+        return obs_base[tiempos_base[exact_idx]].copy()
     return None
 
 def generar_rinex_sincronizado(raw_path, out_path, obs_dict):
@@ -636,7 +706,7 @@ def calcular_posicion_satelite_wgs84(eph, t_emision, tau_vuelo, sys_char='G'):
     return (xs * math.cos(theta) + ys * math.sin(theta), -xs * math.sin(theta) + ys * math.cos(theta), zs, dt_sat)
 
 # =====================================================================
-# ENRUTADOR AUTOMÁTICO BASADO EN SELECCIÓN DE INTERFAZ DE USUARIO
+# ENRUTADOR AUTOMÁTICO BASADO EN CALIDAD DE OBSERVABLES (L1/L5)
 # =====================================================================
 def analizar_calidad_y_senales_rinex(obs_b, obs_r, modo_hardware="iguales"):
     tows_b = sorted(list(obs_b.keys()), key=lambda k: obs_b[k].get('_meta', (0,0,0,0,0,0)))
@@ -648,10 +718,19 @@ def analizar_calidad_y_senales_rinex(obs_b, obs_r, modo_hardware="iguales"):
     total_eval = max(len(tows_b), len(tows_r))
     ratio_sync = (sync_epochs / total_eval) if total_eval > 0 else 0.0
     
-    if modo_hardware == "iguales":
-        return "MODO_D_DGPS", ratio_sync, "Modo seleccionado por interfaz: Teléfonos iguales -> Enrutando a Módulo D (DGPS)."
+    # Análisis forense y robusto de disponibilidad de portadoras L1/L5 reales
+    tiene_l5_real = False
+    for t in tows_r[:20]:
+        for s, d in obs_r[t].items():
+            if s != '_meta' and 'L5' in d and d['L5'] != 0.0:
+                tiene_l5_real = True
+                break
+        if tiene_l5_real: break
+
+    if tiene_l5_real and modo_hardware != "iguales":
+        return "MODO_B_ASINCRONO", ratio_sync, "Análisis de Señal: Doble frecuencia L1/L5 detectada -> Enrutando a Módulo B (Asincrónico)."
     else:
-        return "MODO_B_ASINCRONO", ratio_sync, "Modo seleccionado por interfaz: Teléfonos diferentes -> Enrutando a Módulo B (Asincrónico)."
+        return "MODO_D_DGPS", ratio_sync, "Análisis de Señal: Monofrecuencia o Código Puro -> Enrutando a Módulo D (DGPS Estricto)."
 
 # =====================================================================
 # AISLAMIENTO DE OBSERVABLES (MODO B Y MODO D)
@@ -720,7 +799,7 @@ def aislar_diferencias_MODO_D(obs_b, obs_r):
     return sd_suavizada
 
 # =====================================================================
-# VÍA 1 -> MÓDULO B: MOTOR IRLS ASINCRÓNICO CON MAREAS Y SP3+NAV
+# VÍA 1 -> MÓDULO B: MOTOR IRLS ASINCRÓNICO CON PROYECCIÓN ENU RIGUROSA
 # =====================================================================
 def calcular_IRLS_MODO_B(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom_cache=None):
     try:
@@ -802,6 +881,7 @@ def calcular_IRLS_MODO_B(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom
 
         for iteracion in range(8):
             lat_it, lon_it, alt_it = ecef_a_geodesicas(X_iter, Y_iter, Z_iter)
+            R_enu = obtener_matriz_rotacion_enu(lat_it, lon_it)
             
             H = []; L = []; W_diag = [] 
             
@@ -834,18 +914,19 @@ def calcular_IRLS_MODO_B(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom
                 SD_P_calc_i = (rho_i_r_base + iono_i_r) - (rho_i_b_base + iono_i_b)
                 DD_P_calc = SD_P_calc_i - rc['SD_P_calc_ref']
                 
-                dx_geom = [
-                    -(data['sp'][0] - X_iter) / dist_i_r - (-(rc['sp'][0] - X_iter) / rc['dist_ref_r']),
-                    -(data['sp'][1] - Y_iter) / dist_i_r - (-(rc['sp'][1] - Y_iter) / rc['dist_ref_r']),
-                    -(data['sp'][2] - Z_iter) / dist_i_r - (-(rc['sp'][2] - Z_iter) / rc['dist_ref_r'])
-                ]
+                # Vector director unitario ECEF para el satélite i y de referencia rc
+                u_i_ecef = [-(data['sp'][0] - X_iter) / dist_i_r, -(data['sp'][1] - Y_iter) / dist_i_r, -(data['sp'][2] - Z_iter) / dist_i_r]
+                u_rc_ecef = [-(rc['sp'][0] - X_iter) / rc['dist_ref_r'], -(rc['sp'][1] - Y_iter) / rc['dist_ref_r'], -(rc['sp'][2] - Z_iter) / rc['dist_ref_r']]
                 
-                sin_el_i_sq = math.sin(math.radians(data['el']))**2
-                sin_el_ref_sq = math.sin(math.radians(rc['el']))**2
-                snr_i_pow = 10.0 ** (data.get('snr', 30.0) / 10.0)
-                snr_ref_pow = 10.0 ** (rc['snr'] / 10.0)
+                # CORRECCIÓN RIGUROSA: Proyección estricta a ENU usando R_enu
+                u_i_enu = multiplicar_matriz_vector_3x3(R_enu, u_i_ecef)
+                u_rc_enu = multiplicar_matriz_vector_3x3(R_enu, u_rc_ecef)
                 
-                w_i_ref = (sin_el_i_sq * snr_i_pow * sin_el_ref_sq * snr_ref_pow) / max(1.0, (sin_el_i_sq * snr_i_pow) + (sin_el_ref_sq * snr_ref_pow))
+                dx_geom = [u_i_enu[0] - u_rc_enu[0], u_i_enu[1] - u_rc_enu[1], u_i_enu[2] - u_rc_enu[2]]
+                
+                el_rad_i = math.radians(data['el'])
+                el_rad_ref = math.radians(rc['el'])
+                w_P = (math.sin(el_rad_i) ** 2) * (math.sin(el_rad_ref) ** 2)
 
                 DD_P_obs = data['sd_P'] - rc['sd_P']
                 res_P = DD_P_obs - DD_P_calc
@@ -853,10 +934,8 @@ def calcular_IRLS_MODO_B(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom
                 L.append([res_P])
                 H.append(dx_geom)
                 
-                if iteracion == 0:
-                    w_P = w_i_ref * 1.0
-                else:
-                    w_P = w_i_ref * 1.0 / max(1.0, abs(prev_residuals[res_idx]) / 2.0)
+                if iteracion > 0:
+                    w_P = w_P / max(1.0, abs(prev_residuals[res_idx]) / 2.0)
                 W_diag.append(w_P)
                 res_idx += 1
 
@@ -877,25 +956,31 @@ def calcular_IRLS_MODO_B(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom
             if not Q: return None, "FAILED", None
             
             pdop = math.sqrt(Q[0][0] + Q[1][1] + Q[2][2])
-            Delta_X = matmul(Q, U_vec)
-            if not Delta_X or len(Delta_X) < 3 or not Delta_X[0]: return None, "FAILED", None
+            Delta_ENU = matmul(Q, U_vec)
+            if not Delta_ENU or len(Delta_ENU) < 3 or not Delta_ENU[0]: return None, "FAILED", None
 
-            X_iter += Delta_X[0][0]; Y_iter += Delta_X[1][0]; Z_iter += Delta_X[2][0]
+            # Conversión de corrección ENU a incremento ECEF mediante la transpuesta de R_enu
+            dE, dN, dU = Delta_ENU[0][0], Delta_ENU[1][0], Delta_ENU[2][0]
+            dX = R_enu[0][0]*dE + R_enu[1][0]*dN + R_enu[2][0]*dU
+            dY = R_enu[0][1]*dE + R_enu[1][1]*dN + R_enu[2][1]*dU
+            dZ = R_enu[0][2]*dE + R_enu[1][2]*dN + R_enu[2][2]*dU
+
+            X_iter += dX; Y_iter += dY; Z_iter += dZ
                 
             prev_residuals = []
             for r in range(len(H)):
-                v_val = sum(H[r][idx] * Delta_X[idx][0] for idx in range(len(H[0]))) - L[r][0]
+                v_val = sum(H[r][idx] * Delta_ENU[idx][0] for idx in range(len(H[0]))) - L[r][0]
                 prev_residuals.append(v_val)
             
-            if max(abs(Delta_X[0][0]), abs(Delta_X[1][0]), abs(Delta_X[2][0])) < 1e-3:
-                return (X_iter - dx_tide, Y_iter - dy_tide, Z_iter - dz_tide), "FLOAT (IRLS Rescate)", pdop
+            if max(abs(dE), abs(dN), abs(dU)) < 1e-3:
+                return (X_iter - dx_tide, Y_iter - dy_tide, Z_iter - dz_tide), "FLOAT (IRLS Rescate ENU)", pdop
                 
-        return (X_iter - dx_tide, Y_iter - dy_tide, Z_iter - dz_tide), "FLOAT (IRLS Rescate)", pdop
+        return (X_iter - dx_tide, Y_iter - dy_tide, Z_iter - dz_tide), "FLOAT (IRLS Rescate ENU)", pdop
     except Exception as e:
         return None, f"FAILED_EXCEPTION:_{str(e)}", None
 
 # =====================================================================
-# VÍA 2 -> MÓDULO D: NUEVO MOTOR DGPS ESTRICTO CÓDIGO PURO (C1/C5 SIN FASE)
+# VÍA 2 -> MÓDULO D: NUEVO MOTOR DGPS ESTRICTO CÓDIGO PURO CON ENU
 # =====================================================================
 def calcular_IRLS_MODO_D(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom_cache=None):
     try:
@@ -977,6 +1062,7 @@ def calcular_IRLS_MODO_D(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom
 
         for iteracion in range(8):
             lat_it, lon_it, alt_it = ecef_a_geodesicas(X_iter, Y_iter, Z_iter)
+            R_enu = obtener_matriz_rotacion_enu(lat_it, lon_it)
             
             H = []; L = []; W_diag = [] 
             
@@ -1009,18 +1095,17 @@ def calcular_IRLS_MODO_D(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom
                 SD_P_calc_i = (rho_i_r_base + iono_i_r) - (rho_i_b_base + iono_i_b)
                 DD_P_calc = SD_P_calc_i - rc['SD_P_calc_ref']
                 
-                dx_geom = [
-                    -(data['sp'][0] - X_iter) / dist_i_r - (-(rc['sp'][0] - X_iter) / rc['dist_ref_r']),
-                    -(data['sp'][1] - Y_iter) / dist_i_r - (-(rc['sp'][1] - Y_iter) / rc['dist_ref_r']),
-                    -(data['sp'][2] - Z_iter) / dist_i_r - (-(rc['sp'][2] - Z_iter) / rc['dist_ref_r'])
-                ]
+                u_i_ecef = [-(data['sp'][0] - X_iter) / dist_i_r, -(data['sp'][1] - Y_iter) / dist_i_r, -(data['sp'][2] - Z_iter) / dist_i_r]
+                u_rc_ecef = [-(rc['sp'][0] - X_iter) / rc['dist_ref_r'], -(rc['sp'][1] - Y_iter) / rc['dist_ref_r'], -(rc['sp'][2] - Z_iter) / rc['dist_ref_r']]
                 
-                sin_el_i_sq = math.sin(math.radians(data['el']))**2
-                sin_el_ref_sq = math.sin(math.radians(rc['el']))**2
-                snr_i_pow = 10.0 ** (data.get('snr', 30.0) / 10.0)
-                snr_ref_pow = 10.0 ** (rc['snr'] / 10.0)
+                u_i_enu = multiplicar_matriz_vector_3x3(R_enu, u_i_ecef)
+                u_rc_enu = multiplicar_matriz_vector_3x3(R_enu, u_rc_ecef)
                 
-                w_i_ref = (sin_el_i_sq * snr_i_pow * sin_el_ref_sq * snr_ref_pow) / max(1.0, (sin_el_i_sq * snr_i_pow) + (sin_el_ref_sq * snr_ref_pow))
+                dx_geom = [u_i_enu[0] - u_rc_enu[0], u_i_enu[1] - u_rc_enu[1], u_i_enu[2] - u_rc_enu[2]]
+                
+                el_rad_i = math.radians(data['el'])
+                el_rad_ref = math.radians(rc['el'])
+                w_P = (math.sin(el_rad_i) ** 2) * (math.sin(el_rad_ref) ** 2)
 
                 DD_P_obs = data['sd_P'] - rc['sd_P']
                 res_P = DD_P_obs - DD_P_calc
@@ -1028,10 +1113,8 @@ def calcular_IRLS_MODO_D(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom
                 L.append([res_P])
                 H.append(dx_geom)
                 
-                if iteracion == 0:
-                    w_P = w_i_ref * 1.0
-                else:
-                    w_P = w_i_ref * 1.0 / max(1.0, abs(prev_residuals[res_idx]) / 2.0)
+                if iteracion > 0:
+                    w_P = w_P / max(1.0, abs(prev_residuals[res_idx]) / 2.0)
                 W_diag.append(w_P)
                 res_idx += 1
 
@@ -1052,20 +1135,25 @@ def calcular_IRLS_MODO_D(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom
             if not Q: return None, "FAILED", None
             
             pdop = math.sqrt(Q[0][0] + Q[1][1] + Q[2][2])
-            Delta_X = matmul(Q, U_vec)
-            if not Delta_X or len(Delta_X) < 3 or not Delta_X[0]: return None, "FAILED", None
+            Delta_ENU = matmul(Q, U_vec)
+            if not Delta_ENU or len(Delta_ENU) < 3 or not Delta_ENU[0]: return None, "FAILED", None
 
-            X_iter += Delta_X[0][0]; Y_iter += Delta_X[1][0]; Z_iter += Delta_X[2][0]
+            dE, dN, dU = Delta_ENU[0][0], Delta_ENU[1][0], Delta_ENU[2][0]
+            dX = R_enu[0][0]*dE + R_enu[1][0]*dN + R_enu[2][0]*dU
+            dY = R_enu[0][1]*dE + R_enu[1][1]*dN + R_enu[2][1]*dU
+            dZ = R_enu[0][2]*dE + R_enu[1][2]*dN + R_enu[2][2]*dU
+
+            X_iter += dX; Y_iter += dY; Z_iter += dZ
                 
             prev_residuals = []
             for r in range(len(H)):
-                v_val = sum(H[r][idx] * Delta_X[idx][0] for idx in range(len(H[0]))) - L[r][0]
+                v_val = sum(H[r][idx] * Delta_ENU[idx][0] for idx in range(len(H[0]))) - L[r][0]
                 prev_residuals.append(v_val)
             
-            if max(abs(Delta_X[0][0]), abs(Delta_X[1][0]), abs(Delta_X[2][0])) < 1e-3:
-                return (X_iter - dx_tide, Y_iter - dy_tide, Z_iter - dz_tide), "FLOAT (DGPS Código Puro)", pdop
+            if max(abs(dE), abs(dN), abs(dU)) < 1e-3:
+                return (X_iter - dx_tide, Y_iter - dy_tide, Z_iter - dz_tide), "FLOAT (DGPS Código Puro ENU)", pdop
                 
-        return (X_iter - dx_tide, Y_iter - dy_tide, Z_iter - dz_tide), "FLOAT (DGPS Código Puro)", pdop
+        return (X_iter - dx_tide, Y_iter - dy_tide, Z_iter - dz_tide), "FLOAT (DGPS Código Puro ENU)", pdop
     except Exception as e:
         return None, f"FAILED_EXCEPTION:_{str(e)}", None
 
@@ -1206,7 +1294,7 @@ def generar_informe_homogeneizacion_detallado(base_name, rover_name, base_raw, r
   [-] Ventana de Medición       : {r_ini_str} al {r_fin_str}
   [-] Duración Neta Solapamiento: {duracion_str} (HH:MM:SS)
 
-[3] MATRIZ RESULTANTE (ESTRICTA, SIN INTERPOLACIÓN)
+[3] MATRIZ RESULTANTE (ESTRICTA, CON INTERPOLACIÓN LINEAL)
   [-] Épocas Útiles Sincronizadas: {es}
   [-] Tasa de Éxito sobre Rover  : {f_14(t_exito)}%
   [-] Iteraciones EKF Sugeridas  : {sug_iter} (Basado en densidad)
@@ -1222,9 +1310,9 @@ def generar_informe_ascii(tipo, p_dict):
     estado_sol = "FLOAT"
     
     if p_dict.get('estrategia') == 'MODO_B_ASINCRONO':
-        estado_sol = 'FLOAT (DGPS IRLS Asincrónico + Site Calibration)' if p_dict.get('shift_applied') else 'FLOAT (DGPS Clásico Termux)'
+        estado_sol = 'FLOAT (DGPS IRLS Asincrónico + ENU Riguroso)'
     elif p_dict.get('estrategia') == 'MODO_D_DGPS':
-        estado_sol = 'FLOAT (DGPS Código Puro Estricto)'
+        estado_sol = 'FLOAT (DGPS Código Puro Estricto + ENU)'
         
     err_h_str = f"± {f_14(p_dict['err_h'])} m (Vinculante)" if p_dict['err_h'] > 0.0 else 'Inactiva'
     err_v_str = f"± {f_14(p_dict['err_v'])} m (Vinculante)" if p_dict['err_v'] > 0.0 else 'Inactiva'
@@ -1234,19 +1322,9 @@ def generar_informe_ascii(tipo, p_dict):
     fecha_calculo = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     dist_baseline = math.sqrt((p_dict['b_n'] - p_dict['r_n_calc'])**2 + (p_dict['b_e'] - p_dict['r_e_calc'])**2 + (p_dict['b_z'] - p_dict['r_z_calc'])**2)
     
-    shift_bloque = ""
-    if p_dict.get('shift_applied'):
-        shift_bloque = f"""
-[4] COMPENSACIÓN DE SITIO EMPÍRICA (SITE CALIBRATION)
-------------------------------------------------------------------------
-  [-] Sesgo Norte Descontado : {f_14(p_dict.get('bias_n', 0.0))} m
-  [-] Sesgo Este Descontado  : {f_14(p_dict.get('bias_e', 0.0))} m
-  [-] Sesgo Cota Descontado  : {f_14(p_dict.get('bias_z', 0.0))} m
-"""
-    
     informe = f"""
 ========================================================================
-             INFORME DE PROCESAMIENTO GNSSJP PRO (V17)
+             INFORME DE PROCESAMIENTO GNSSJP PRO (V18)
 ========================================================================
 
 [*] RESULTADO DE MEDICIÓN ABSOLUTA ({estado_sol})
@@ -1289,7 +1367,7 @@ def generar_informe_ascii(tipo, p_dict):
       Norte : {f_14(p_dict['r_n_calc'])} m
       Este  : {f_14(p_dict['r_e_calc'])} m
       Cota  : {f_14(p_dict['r_z_calc'])} m
-{shift_bloque}========================================================================
+========================================================================
 """
     return informe
 
@@ -1362,7 +1440,7 @@ def tab1_homogenizar():
             base_raw_dict = parse_rinex_obs_completo(p_b_raw)
             rover_raw_dict = parse_rinex_obs_completo(p_r_raw)
             
-            yield "> [ENRUTADOR] Evaluando selección de interfaz de usuario...\n"
+            yield "> [ENRUTADOR] Evaluando calidad y señales RINEX...\n"
             modo_str, ratio, msg = analizar_calidad_y_senales_rinex(base_raw_dict, rover_raw_dict, modo_hardware=modo_hardware)
             yield f"  [-] Módulo pre-asignado: {modo_str}\n"
             yield f"  [-] Justificación: {msg}\n\n"
@@ -1373,9 +1451,9 @@ def tab1_homogenizar():
             for tr in sorted(list(rover_raw_dict.keys()), key=lambda k: rover_raw_dict[k].get('_meta', (0,0,0,0,0,0))):
                 c += 1
                 if total_epochs > 0 and c % max(1, total_epochs // 10) == 0: 
-                    yield f"[PROGRESO] Cotejando épocas sin distorsión... {int((c / float(total_epochs)) * 100.0)}%\n"
+                    yield f"[PROGRESO] Cotejando épocas con interpolación lineal exacta... {int((c / float(total_epochs)) * 100.0)}%\n"
                 
-                base_interp = interpolar_base_a_rover(base_raw_dict, tr, max_gap=60.0)
+                base_interp = interpolar_base_a_rover(base_raw_dict, tr, max_gap=0.5)
                 
                 if base_interp:
                     base_sinc[tr] = base_interp
@@ -1542,11 +1620,10 @@ def tab3_calibrar():
             
             lat_b, lon_b, _ = utm_a_geodesicas(utm_e, utm_n, utm_h, utm_hem)
             X_b, Y_b, Z_b = geodesicas_a_ecef(lat_b, lon_b, utm_c + h_b)
-            X_bg, Y_bg, Z_bg = geodesicas_a_ecef(lat_b, lon_b, utm_c)
 
             geom_cache = {}
 
-            yield f"> [SISTEMA] Iniciando Búsqueda Determinista | {modo_str} (IRLS)...\n"
+            yield f"> [SISTEMA] Iniciando Búsqueda Determinista | {modo_str} (IRLS + ENU)...\n"
             if modo_str == "MODO_D_DGPS": sd_suavizada = aislar_diferencias_MODO_D(obs_b_raw, obs_r_raw)
             else: sd_suavizada = aislar_diferencias_MODO_B(obs_b_raw, obs_r_raw)
             
@@ -1561,7 +1638,7 @@ def tab3_calibrar():
             yield f"  [-] Épocas totales en archivo: {total_eps}\n"
             yield f"  [-] Épocas estadísticas a evaluar: {len(t_sample)} (Salto: 1 cada {step})\n"
             
-            yield "[PROGRESO] Fase 1: Extracción de Límites y Poblando Caché (Pre-Scan Clásico IRLS)...\n"
+            yield "[PROGRESO] Fase 1: Extracción de Límites y Poblando Caché (Pre-Scan IRLS)...\n"
             coords_raw = []
             for t in t_sample:
                 if os.path.exists(flag_file): break
@@ -1689,7 +1766,6 @@ def tab3_calibrar():
                 yield f"  [-] Error Permitido Vertical (m): {f_14(best_params['ev'])}\n"
                 yield "--------------------------------------------------------\n"
                 yield f"  [*] Menor Distancia 3D al Punto: {f_14(best_params['rmse'])} m\n"
-                yield f"  [*] Deltas Residuales -> N: {f_14(best_params['dn'])}m, E: {f_14(best_params['de'])}m, Z: {f_14(best_params['dz'])}m\n"
                 yield f"  [*] Épocas Retenidas: {best_params['ret']}\n"
                 yield "========================================================\n"
                 yield "\n[SUCCESS]"
@@ -1710,7 +1786,6 @@ def tab4_procesar():
     h_r = safe_f(leer_estado('altura_rover'), 0.0)
     modo_hardware = leer_estado('modo_hardware') or 'iguales'
     
-    # TRANSFERENCIA EXPLICITA Y FLUIDA DE PARÁMETROS CALCULADOS EN PESTAÑA 3 CON TODOS LOS DECIMALES
     p_mask = safe_f(leer_estado('opt_mask'), 15.0)
     p_cp = safe_f(leer_estado('opt_cp'), 2.0)
     p_ca = safe_f(leer_estado('opt_ca'), 0.5)
@@ -1758,22 +1833,19 @@ def tab4_procesar():
             
             lat_b, lon_b, _ = utm_a_geodesicas(utm_e, utm_n, utm_h, utm_hem)
             X_b, Y_b, Z_b = geodesicas_a_ecef(lat_b, lon_b, utm_c + h_b)
-            X_bg, Y_bg, Z_bg = geodesicas_a_ecef(lat_b, lon_b, utm_c)
             
             global_pdop = 99.9
             global_lambda = 0.0
 
-            yield f"\n> [SISTEMA] Iniciando Procesamiento Definitivo 100% Épocas | {modo_str} (IRLS)...\n"
-            yield "[PROGRESO] Extrayendo Observables Diferenciales...\n"
+            yield f"\n> [SISTEMA] Iniciando Procesamiento Definitivo 100% Épocas | {modo_str} (IRLS + ENU)...\n"
+            yield "[PROGRESO] Extrayendo Observables Diferenciales con interpolación temporal...\n"
             
             rover_tows = sorted(list(obs_r_raw.keys()), key=lambda k: obs_r_raw[k].get('_meta', (0,0,0,0,0,0)))
-            base_tows = sorted(list(obs_b_raw.keys()), key=lambda k: obs_b_raw[k].get('_meta', (0,0,0,0,0,0)))
             obs_b_sync = {}
             for tr in rover_tows:
-                if not base_tows: continue
-                idx = min(range(len(base_tows)), key=lambda i: abs(base_tows[i] - tr))
-                if abs(base_tows[idx] - tr) <= p_max_gap:
-                    obs_b_sync[tr] = obs_b_raw[base_tows[idx]].copy()
+                base_interp = interpolar_base_a_rover(obs_b_raw, tr, max_gap=p_max_gap)
+                if base_interp:
+                    obs_b_sync[tr] = base_interp
                     obs_b_sync[tr]['_meta'] = obs_r_raw[tr]['_meta']
 
             if modo_str == "MODO_D_DGPS": sd_suavizada = aislar_diferencias_MODO_D(obs_b_sync, obs_r_raw)
@@ -1786,7 +1858,7 @@ def tab4_procesar():
             t_eps = len(sd_suavizada); c = 0
             for t in sd_suavizada:
                 c += 1
-                if c % max(1, t_eps // 10) == 0: yield f"[PROGRESO] Resolviendo Matrices IRLS DGPS... {int((c / float(t_eps)) * 100.0)}%\n"
+                if c % max(1, t_eps // 10) == 0: yield f"[PROGRESO] Resolviendo Matrices IRLS DGPS (ENU)... {int((c / float(t_eps)) * 100.0)}%\n"
                 
                 if modo_str == "MODO_D_DGPS": sem, status, pdop_val = calcular_IRLS_MODO_D(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, p_mask, geom_cache=None)
                 else: sem, status, pdop_val = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, p_mask, geom_cache=None)
@@ -1810,16 +1882,9 @@ def tab4_procesar():
             bias_e = safe_f(leer_estado('opt_bias_e'), 0.0)
             bias_z = safe_f(leer_estado('opt_bias_z'), 0.0)
             
-            if modo_str == "MODO_B_ASINCRONO" or modo_str == "MODO_D_DGPS":
-                nf_final = float(nf) - float(bias_n)
-                ef_final = float(ef) - float(bias_e)
-                zf_final_ground = float(zf) - float(bias_z) 
-                shift_applied = True
-            else:
-                nf_final = float(nf)
-                ef_final = float(ef)
-                zf_final_ground = float(zf) - float(h_r)     
-                shift_applied = False
+            nf_final = float(nf) - float(bias_n)
+            ef_final = float(ef) - float(bias_e)
+            zf_final_ground = float(zf) - float(bias_z) 
             
             exec_time = time.time() - start_time
             
@@ -1838,8 +1903,6 @@ def tab4_procesar():
                 'r_n_calc': float(nf_final), 'r_e_calc': float(ef_final), 'r_z_calc': float(zf_final_ground),
                 'utm_h': int(utm_h), 'utm_hem': str(utm_hem),
                 'estrategia': str(estrategia),
-                'shift_applied': bool(shift_applied),
-                'bias_n': float(bias_n), 'bias_e': float(bias_e), 'bias_z': float(bias_z),
                 't_exec': float(exec_time)
             }
             
