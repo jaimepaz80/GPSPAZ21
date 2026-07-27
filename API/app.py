@@ -1682,8 +1682,8 @@ def generar_informe_homogeneizacion_detallado(base_name, rover_name, base_raw, r
                 if s != '_meta':
                     if s[0] in c: c[s[0]] += 1
                     sats_unicos.add(s)
-                    if 'C1' in data or 'L1' in data: tiene_l1 = True
-                    if 'C5' in data or 'L5' in data: tiene_l5 = True
+                    if 'L1' in data: tiene_l1 = True
+                    if 'L5' in data: tiene_l5 = True
                     if 'S1' in data and data['S1'] > 0:
                         snr_total += data['S1']; snr_count += 1
                     if 'S5' in data and data['S5'] > 0:
@@ -2025,6 +2025,7 @@ def tab2_efemerides():
 
 @app.route('/API/tab3_calibrar', methods=['POST'])
 def tab3_calibrar():
+    start_time = time.time()
     utm_n = leer_estado('utm_norte')
     utm_e = leer_estado('utm_este')
     utm_c = leer_estado('utm_cota')
@@ -2091,7 +2092,7 @@ def tab3_calibrar():
                 t_sample_full = list(sd_suavizada.keys())
                 total_eps = len(t_sample_full)
                 step = max(1, total_eps // 300)
-                t_sample = t_sample_full[::step]
+                t_sample = t_sample_full[::step][:300]
                 
                 yield f"[PROGRESO OPTIMIZADOR RENDER] Decimación Dinámica Activa:\n"
                 yield f"  [-] Épocas totales en archivo: {total_eps}\n"
@@ -2136,7 +2137,9 @@ def tab3_calibrar():
                 snr_center, snr_span = p_snr, 5.0
                 gap_center, gap_span = p_max_gap, 0.02
                 
+                timeout_triggered = False
                 for nivel in range(p_iter):
+                    if timeout_triggered: break
                     yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{p_iter})...\n"
                     m_grid = [max(1.0, min(25.0, x)) for x in [m_center - m_span, m_center, m_center + m_span]]
                     cp_grid = [max(0.1, min(5.0, x)) for x in [cp_center - cp_span, cp_center, cp_center + cp_span]]
@@ -2148,8 +2151,14 @@ def tab3_calibrar():
                     nivel_best_params = {}
                     
                     for gap in set(gap_grid):
+                        if timeout_triggered: break
                         for m in set(m_grid):
+                            if timeout_triggered: break
                             for snr in set(snr_grid):
+                                if time.time() - start_time > 270.0:
+                                    yield f"  [!] WATCHDOG ACTIVADO: Límite de 270s superado. Aplicando Early Stopping...\n"
+                                    timeout_triggered = True
+                                    break
                                 kf_est = {'X': [[X_bg], [Y_bg], [Z_bg]], 'P': P_init, 'X_base': (X_b, Y_b, Z_b), 'fix_flags': 0, 'h_r': h_r}
                                 coords = []
                                 for t in t_sample:
@@ -2207,7 +2216,7 @@ def tab3_calibrar():
                 t_sample_full = list(sd_suavizada.keys())
                 total_eps = len(t_sample_full)
                 step = max(1, total_eps // 300)
-                t_sample = t_sample_full[::step]
+                t_sample = t_sample_full[::step][:300]
                 
                 yield f"[PROGRESO OPTIMIZADOR RENDER] Decimación Dinámica Activa:\n"
                 yield f"  [-] Épocas totales en archivo: {total_eps}\n"
@@ -2244,7 +2253,9 @@ def tab3_calibrar():
                 cp_center, cp_span = 2.0, 1.5
                 ca_center, ca_span = 2.0, 1.5
                 
+                timeout_triggered = False
                 for nivel in range(p_iter):
+                    if timeout_triggered: break
                     yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{p_iter})...\n"
                     m_grid = [max(5.0, min(15.0, x)) for x in [m_center - m_span, m_center, m_center + m_span]]
                     cp_grid = [max(0.1, min(5.0, x)) for x in [cp_center - cp_span, cp_center, cp_center + cp_span]]
@@ -2254,6 +2265,10 @@ def tab3_calibrar():
                     nivel_best_params = {}
                     
                     for m in set(m_grid):
+                        if time.time() - start_time > 270.0:
+                            yield f"  [!] WATCHDOG ACTIVADO: Límite de 270s superado. Aplicando Early Stopping...\n"
+                            timeout_triggered = True
+                            break
                         coords = []
                         for t in t_sample:
                             if modo_str == "MODO_D_DGPS": sem, status, _ = calcular_IRLS_MODO_D(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, m)
@@ -2307,11 +2322,13 @@ def tab3_calibrar():
                 guardar_estado('estrategia_activa', modo_str)
                 
                 fecha_calculo = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                t_exec_script = time.time() - start_time
 
                 yield "\n========================================================\n"
                 yield f"      [INFORME] PARÁMETROS ÓPTIMOS ({modo_str})\n"
                 yield "========================================================\n"
                 yield f"  [-] Fecha y Hora de Cálculo: {fecha_calculo}\n"
+                yield f"  [-] Tiempo de Ejecución Script: {t_exec_script:.3f} segundos\n"
                 yield f"  [-] Coord. Base Fija (N,E,Z): {f_14(utm_n)}, {f_14(utm_e)}, {f_14(utm_c)}\n"
                 yield f"  [-] Coord. Rover Cal (N,E,Z): {f_14(utm_n_r)}, {f_14(utm_e_r)}, {f_14(utm_c_r)}\n"
                 yield "--------------------------------------------------------\n"
