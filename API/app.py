@@ -39,11 +39,8 @@ WAVE_L1 = C_LIGHT / FREQ_L1
 WAVE_L5 = C_LIGHT / FREQ_L5
 
 def f_14(val):
-    if val is None: return "0.0"
+    if val is None: return "0.00000000000000"
     s = f"{float(val):.14f}"
-    if '.' in s:
-        s = s.rstrip('0')
-        if s.endswith('.'): s += '0'
     return s
 
 def safe_f(val, default=0.0):
@@ -413,7 +410,7 @@ def interpolate_sp3(sp3_data, sat, t_emision, degree=9):
     return result
 
 def parse_rinex_nav_real(path):
-    ephemeris = {'_iono': {'alpha': [0]*4, 'beta': [0]*4}}
+    ephemeris = {'_iono': {'alpha': [0.0]*4, 'beta': [0.0]*4}}
     if not path or not os.path.exists(path): return ephemeris
     with open(path, 'r', encoding='utf-8', errors='ignore') as f:
         in_h, sat, data = True, None, []
@@ -743,7 +740,7 @@ def calcular_IRLS_MODO_B(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom
         X_iter, Y_iter, Z_iter = X_b_corr, Y_b_corr, Z_b_corr 
         lat_b, lon_b, alt_b = ecef_a_geodesicas(X_b_corr, Y_b_corr, Z_b_corr)
         
-        iono = nav.get('_iono', {'alpha': [0]*4, 'beta': [0]*4})
+        iono = nav.get('_iono', {'alpha': [0.0]*4, 'beta': [0.0]*4})
         alpha, beta = iono['alpha'], iono['beta']
         
         sat_positions = {}
@@ -918,7 +915,7 @@ def calcular_IRLS_MODO_D(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom
         X_iter, Y_iter, Z_iter = X_b_corr, Y_b_corr, Z_b_corr 
         lat_b, lon_b, alt_b = ecef_a_geodesicas(X_b_corr, Y_b_corr, Z_b_corr)
         
-        iono = nav.get('_iono', {'alpha': [0]*4, 'beta': [0]*4})
+        iono = nav.get('_iono', {'alpha': [0.0]*4, 'beta': [0.0]*4})
         alpha, beta = iono['alpha'], iono['beta']
         
         sat_positions = {}
@@ -1076,7 +1073,7 @@ def calcular_IRLS_MODO_D(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom
 # ESTADÍSTICAS Y FILTRADO VINCULANTE (HARD FILTER)
 # =====================================================================
 def estadistica_desacoplada(coordenadas, conf_plani, conf_alti, err_hor_max, err_ver_max):
-    if not coordenadas: return None, None, None, 0, 0, 0, 0, 0.0
+    if not coordenadas: return None, None, None, 0.0, 0.0, 0.0, 0, 0.0
     
     N_list = [c[0] for c in coordenadas]
     E_list = [c[1] for c in coordenadas]
@@ -1084,7 +1081,7 @@ def estadistica_desacoplada(coordenadas, conf_plani, conf_alti, err_hor_max, err
 
     def get_median(lst):
         s = sorted(lst); n = len(s)
-        if n == 0: return 0
+        if n == 0: return 0.0
         return s[n//2] if n % 2 == 1 else (s[n//2 - 1] + s[n//2]) / 2.0
 
     med_N = get_median(N_list)
@@ -1100,7 +1097,7 @@ def estadistica_desacoplada(coordenadas, conf_plani, conf_alti, err_hor_max, err
             continue
         valid_coords.append(c)
 
-    if not valid_coords: return None, None, None, 0, 0, 0, 0, 0.0
+    if not valid_coords: return None, None, None, 0.0, 0.0, 0.0, 0, 0.0
     
     N_v = [c[0] for c in valid_coords]
     E_v = [c[1] for c in valid_coords]
@@ -1109,19 +1106,19 @@ def estadistica_desacoplada(coordenadas, conf_plani, conf_alti, err_hor_max, err
 
     def calc_mean_std(arr):
         n = len(arr)
-        m = sum(arr) / n
-        return m, (math.sqrt(sum((x - m)**2 for x in arr) / n) if n > 1 else 0.0)
+        m = sum(arr) / float(n)
+        return m, (math.sqrt(sum((x - m)**2 for x in arr) / float(n)) if n > 1 else 0.0)
 
     N_m, N_s = calc_mean_std(N_v)
     E_m, E_s = calc_mean_std(E_v)
     Z_m, Z_s = calc_mean_std(Z_v)
     
-    N_f = [x for x in N_v if abs(x - N_m) <= conf_plani * N_s] if N_s > 0 else N_v
-    E_f = [x for x in E_v if abs(x - E_m) <= conf_plani * E_s] if E_s > 0 else E_v
-    Z_f = [x for x in Z_v if abs(x - Z_m) <= conf_alti * Z_s] if Z_s > 0 else Z_v
+    N_f = [x for x in N_v if abs(x - N_m) <= conf_plani * N_s] if N_s > 0.0 else N_v
+    E_f = [x for x in E_v if abs(x - E_m) <= conf_plani * E_s] if E_s > 0.0 else E_v
+    Z_f = [x for x in Z_v if abs(x - Z_m) <= conf_alti * Z_s] if Z_s > 0.0 else Z_v
 
-    fix_ratio = (len(f_v) / len(valid_coords)) * 100.0 if valid_coords else 0.0
-    return sum(N_f)/max(1, len(N_f)), sum(E_f)/max(1, len(E_f)), sum(Z_f)/max(1, len(Z_f)), N_s, E_s, Z_s, min(len(N_f), len(E_f), len(Z_f)), fix_ratio
+    fix_ratio = (len(f_v) / float(len(valid_coords))) * 100.0 if valid_coords else 0.0
+    return sum(N_f)/float(max(1, len(N_f))), sum(E_f)/float(max(1, len(E_f))), sum(Z_f)/float(max(1, len(Z_f))), N_s, E_s, Z_s, min(len(N_f), len(E_f), len(Z_f)), fix_ratio
 
 # =====================================================================
 # GENERADORES DE INFORMES (FRONTEND FORENSE)
@@ -1135,7 +1132,7 @@ def generar_informe_homogeneizacion_detallado(base_name, rover_name, base_raw, r
         epocas = len(obs)
         t_ini, t_fin = obs[tiempos[0]]['_meta'], obs[tiempos[-1]]['_meta']
         intervalos = [tiempos[i] - tiempos[i-1] for i in range(1, epocas)]
-        tasa_muestreo = sum(intervalos)/len(intervalos) if intervalos else 0.0
+        tasa_muestreo = sum(intervalos)/float(len(intervalos)) if intervalos else 0.0
         gaps = sum(1 for i in intervalos if i > tasa_muestreo * 1.5)
         
         sats_unicos = set()
@@ -1149,21 +1146,21 @@ def generar_informe_homogeneizacion_detallado(base_name, rover_name, base_raw, r
                     sats_unicos.add(s)
                     if 'L1' in data: tiene_l1 = True
                     if 'L5' in data: tiene_l5 = True
-                    if 'S1' in data and data['S1'] > 0:
+                    if 'S1' in data and data['S1'] > 0.0:
                         snr_total += data['S1']; snr_count += 1
-                    if 'S5' in data and data['S5'] > 0:
+                    if 'S5' in data and data['S5'] > 0.0:
                         snr_total += data['S5']; snr_count += 1
                         
         tipo_senal = "L1+L5 (Doble Frecuencia)" if (tiene_l1 and tiene_l5) else ("L1 (Monofrecuencia)" if tiene_l1 else "C1/C5 (Solo Código)")
-        avg_snr = (snr_total / snr_count) if snr_count > 0 else 0.0
+        avg_snr = (snr_total / float(snr_count)) if snr_count > 0 else 0.0
         total_sats = len(sats_unicos)
         
-        return {k: v/epocas for k, v in c.items()}, epocas, t_ini, t_fin, tasa_muestreo, gaps, tipo_senal, total_sats, avg_snr
+        return {k: v/float(epocas) for k, v in c.items()}, epocas, t_ini, t_fin, tasa_muestreo, gaps, tipo_senal, total_sats, avg_snr
     
     cb, eb, b_ini, b_fin, tr_b, g_b, senal_b, sats_b, snr_b = get_stats(base_raw)
     cr, er, r_ini, r_fin, tr_r, g_r, senal_r, sats_r, snr_r = get_stats(rover_raw)
     cs, es, s_ini, s_fin, tr_s, _, senal_s, sats_s, snr_s = get_stats(rover_sinc)
-    t_exito = (es / er * 100) if er > 0 else 0.0
+    t_exito = (es / float(er) * 100.0) if er > 0 else 0.0
     
     dist_baseline = math.sqrt((c_base['N'] - c_rover['N'])**2 + (c_base['E'] - c_rover['E'])**2 + (c_base['Z'] - c_rover['Z'])**2)
     
@@ -1189,7 +1186,7 @@ def generar_informe_homogeneizacion_detallado(base_name, rover_name, base_raw, r
 ========================================================================
 [0] TRAZABILIDAD TEMPORAL Y ESPACIAL
   [-] Fecha y Hora de Cálculo   : {fecha_calculo}
-  [-] Tiempo de Ejecución Script: {t_exec:.3f} segundos
+  [-] Tiempo de Ejecución Script: {f_14(t_exec)} segundos
   [-] Distancia Base-Rover (3D) : {f_14(dist_baseline)} m
   [-] Coord. Base Fija (N,E,Z)  : {f_14(c_base['N'])}, {f_14(c_base['E'])}, {f_14(c_base['Z'])}
   [-] Coord. Rover Calib (N,E,Z): {f_14(c_rover['N'])}, {f_14(c_rover['E'])}, {f_14(c_rover['Z'])}
@@ -1197,14 +1194,14 @@ def generar_informe_homogeneizacion_detallado(base_name, rover_name, base_raw, r
 [1] PARÁMETROS DE CONTROL (BASE) : {base_name}
   [-] Tipo de Señal GNSS        : {senal_b}
   [-] Satélites Únicos Vistos   : {sats_b}
-  [-] Potencia Promedio (SNR)   : {snr_b:.1f} dBHz
+  [-] Potencia Promedio (SNR)   : {f_14(snr_b)} dBHz
   [-] Épocas Crudas Registradas : {eb}
   [-] Ventana de Medición       : {b_ini_str} al {b_fin_str}
 
 [2] PARÁMETROS DEL MÓVIL (ROVER) : {rover_name}
   [-] Tipo de Señal GNSS        : {senal_r}
   [-] Satélites Únicos Vistos   : {sats_r}
-  [-] Potencia Promedio (SNR)   : {snr_r:.1f} dBHz
+  [-] Potencia Promedio (SNR)   : {f_14(snr_r)} dBHz
   [-] Épocas Crudas Registradas : {er}
   [-] Ventana de Medición       : {r_ini_str} al {r_fin_str}
   [-] Duración Neta Solapamiento: {duracion_str} (HH:MM:SS)
@@ -1229,8 +1226,8 @@ def generar_informe_ascii(tipo, p_dict):
     elif p_dict.get('estrategia') == 'MODO_D_DGPS':
         estado_sol = 'FLOAT (DGPS Código Puro Estricto)'
         
-    err_h_str = f"± {f_14(p_dict['err_h'])} m (Vinculante)" if p_dict['err_h'] > 0 else 'Inactiva'
-    err_v_str = f"± {f_14(p_dict['err_v'])} m (Vinculante)" if p_dict['err_v'] > 0 else 'Inactiva'
+    err_h_str = f"± {f_14(p_dict['err_h'])} m (Vinculante)" if p_dict['err_h'] > 0.0 else 'Inactiva'
+    err_v_str = f"± {f_14(p_dict['err_v'])} m (Vinculante)" if p_dict['err_v'] > 0.0 else 'Inactiva'
     sp3_str = p_dict.get('sp3_file') if p_dict.get('sp3_file') else "[CRÍTICO] Fallback no permitido"
     nav_str = p_dict.get('nav_file', "auto_nav.nav")
     
@@ -1255,14 +1252,14 @@ def generar_informe_ascii(tipo, p_dict):
 [*] RESULTADO DE MEDICIÓN ABSOLUTA ({estado_sol})
 ------------------------------------------------------------------------
   [-] Fecha y Hora de Cálculo: {fecha_calculo}
-  [-] Tiempo de Ejecución    : {p_dict.get('t_exec', 0.0):.3f} segundos
+  [-] Tiempo de Ejecución    : {f_14(p_dict.get('t_exec', 0.0))} segundos
   [-] Tolerancia Horizontal  : {err_h_str}
   [-] Tolerancia Vertical    : {err_v_str}
   [-] Máscara Elevación      : {f_14(p_dict['mask'])}°
   [-] Filtro Planimétrico    : {f_14(p_dict['cp'])} Sigma
   [-] Filtro Altimétrico     : {f_14(p_dict['ca'])} Sigma
   [-] Tolerancia Sync        : {f_14(p_dict.get('max_gap', 0.5))} s
-  [-] Épocas Útiles Retenidas: {p_dict['ret']} ({(p_dict['ret']/max(1, p_dict['total']))*100:.2f}% del total)
+  [-] Épocas Útiles Retenidas: {p_dict['ret']} ({f_14((p_dict['ret']/float(max(1, p_dict['total'])))*100.0)}% del total)
   [-] Motor Matemático Activo: {p_dict.get('estrategia', 'Desconocido')}
 
 [1] TRAZABILIDAD DEL PROYECTO Y ARCHIVOS
@@ -1376,7 +1373,7 @@ def tab1_homogenizar():
             for tr in sorted(list(rover_raw_dict.keys()), key=lambda k: rover_raw_dict[k].get('_meta', (0,0,0,0,0,0))):
                 c += 1
                 if total_epochs > 0 and c % max(1, total_epochs // 10) == 0: 
-                    yield f"[PROGRESO] Cotejando épocas sin distorsión... {int((c / total_epochs) * 100)}%\n"
+                    yield f"[PROGRESO] Cotejando épocas sin distorsión... {int((c / float(total_epochs)) * 100.0)}%\n"
                 
                 base_interp = interpolar_base_a_rover(base_raw_dict, tr, max_gap=60.0)
                 
@@ -1639,19 +1636,19 @@ def tab3_calibrar():
                             
                             if rmse_3d < nivel_best_rmse:
                                 nivel_best_rmse = rmse_3d
-                                nivel_best_params = {'m': m, 'cp': cp, 'ca': ca, 'rmse': rmse_3d}
+                                nivel_best_params = {'m': float(m), 'cp': float(cp), 'ca': float(ca), 'rmse': float(rmse_3d)}
                                 if rmse_3d < global_best_score:
                                     global_best_score = rmse_3d
                                     best_rmse = rmse_3d
-                                    best_params = {'mask': m, 'cp': cp, 'ca': ca, 'eh': best_eh, 'ev': best_ev, 'max_gap': p_max_gap, 'snr': p_snr, 'rmse': rmse_3d, 'ret': ret, 'dn': nf - utm_n_r, 'de': ef - utm_e_r, 'dz': zf - utm_c_r}
+                                    best_params = {'mask': float(m), 'cp': float(cp), 'ca': float(ca), 'eh': float(best_eh), 'ev': float(best_ev), 'max_gap': float(p_max_gap), 'snr': float(p_snr), 'rmse': float(rmse_3d), 'ret': int(ret), 'dn': float(nf - utm_n_r), 'de': float(ef - utm_e_r), 'dz': float(zf - utm_c_r)}
                 
                 if nivel_best_rmse != float('inf') and not time_out:
                     yield f"  [*] Fin Iteración {nivel+1} | Mejor RMSE Local: {f_14(nivel_best_params['rmse'])} m\n"
                     
                 if global_best_score != float('inf'):
-                    m_center, m_span = best_params['mask'], m_span / 2.0
-                    cp_center, cp_span = best_params['cp'], cp_span / 2.0
-                    ca_center, ca_span = best_params['ca'], ca_span / 2.0
+                    m_center, m_span = float(best_params['mask']), m_span / 2.0
+                    cp_center, cp_span = float(best_params['cp']), cp_span / 2.0
+                    ca_center, ca_span = float(best_params['ca']), ca_span / 2.0
                 else:
                     m_span /= 2.0; cp_span /= 2.0; ca_span /= 2.0
             
@@ -1680,7 +1677,7 @@ def tab3_calibrar():
                 yield f"      [INFORME] PARÁMETROS ÓPTIMOS ({modo_str})\n"
                 yield "========================================================\n"
                 yield f"  [-] Fecha y Hora de Cálculo: {fecha_calculo}\n"
-                yield f"  [-] Tiempo de Ejecución Script: {t_exec_script:.3f} segundos\n"
+                yield f"  [-] Tiempo de Ejecución Script: {f_14(t_exec_script)} segundos\n"
                 yield f"  [-] Coord. Base Fija (N,E,Z): {f_14(utm_n)}, {f_14(utm_e)}, {f_14(utm_c)}\n"
                 yield f"  [-] Coord. Rover Cal (N,E,Z): {f_14(utm_n_r)}, {f_14(utm_e_r)}, {f_14(utm_c_r)}\n"
                 yield "--------------------------------------------------------\n"
@@ -1704,16 +1701,16 @@ def tab3_calibrar():
 @app.route('/API/tab4_procesar', methods=['POST'])
 def tab4_procesar():
     start_time = time.time()
-    utm_n = leer_estado('utm_norte')
-    utm_e = leer_estado('utm_este')
-    utm_c = leer_estado('utm_cota')
-    utm_h = leer_estado('utm_huso')
-    utm_hem = leer_estado('utm_hemisferio')
-    h_b = leer_estado('altura_base')
-    h_r = leer_estado('altura_rover')
+    utm_n = safe_f(leer_estado('utm_norte'), 0.0)
+    utm_e = safe_f(leer_estado('utm_este'), 0.0)
+    utm_c = safe_f(leer_estado('utm_cota'), 0.0)
+    utm_h = safe_i(leer_estado('utm_huso'), 19)
+    utm_hem = leer_estado('utm_hemisferio') or 'N'
+    h_b = safe_f(leer_estado('altura_base'), 0.0)
+    h_r = safe_f(leer_estado('altura_rover'), 0.0)
     modo_hardware = leer_estado('modo_hardware') or 'iguales'
     
-    # RECUPERACIÓN ESTRICTA DE PARÁMETROS DINÁMICOS CALCULADOS EN PESTAÑA 3
+    # TRANSFERENCIA EXPLICITA Y FLUIDA DE PARÁMETROS CALCULADOS EN PESTAÑA 3 CON TODOS LOS DECIMALES
     p_mask = safe_f(leer_estado('opt_mask'), 15.0)
     p_cp = safe_f(leer_estado('opt_cp'), 2.0)
     p_ca = safe_f(leer_estado('opt_ca'), 0.5)
@@ -1789,7 +1786,7 @@ def tab4_procesar():
             t_eps = len(sd_suavizada); c = 0
             for t in sd_suavizada:
                 c += 1
-                if c % max(1, t_eps // 10) == 0: yield f"[PROGRESO] Resolviendo Matrices IRLS DGPS... {int((c / t_eps) * 100)}%\n"
+                if c % max(1, t_eps // 10) == 0: yield f"[PROGRESO] Resolviendo Matrices IRLS DGPS... {int((c / float(t_eps)) * 100.0)}%\n"
                 
                 if modo_str == "MODO_D_DGPS": sem, status, pdop_val = calcular_IRLS_MODO_D(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, p_mask, geom_cache=None)
                 else: sem, status, pdop_val = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, p_mask, geom_cache=None)
@@ -1797,11 +1794,11 @@ def tab4_procesar():
                 if sem:
                     la, lo, al = ecef_a_geodesicas(sem[0], sem[1], sem[2])
                     nt, et = geodesicas_a_utm(la, lo, utm_h)
-                    coords.append((nt, et, al, status))
-                    if pdop_val: pdop_list.append(pdop_val)
+                    coords.append((float(nt), float(et), float(al), str(status)))
+                    if pdop_val: pdop_list.append(float(pdop_val))
                     
             if not coords: yield "\n> [ERROR] Fracaso algorítmico total en Inversión NxN.\n"; return
-            global_pdop = sum(pdop_list) / max(1, len(pdop_list))
+            global_pdop = sum(pdop_list) / float(max(1, len(pdop_list)))
 
             res_estadistica = estadistica_desacoplada(coords, p_cp, p_ca, err_hor_max, err_ver_max)
             if res_estadistica[0] is None:
@@ -1809,41 +1806,41 @@ def tab4_procesar():
                 
             nf, ef, zf, std_n, std_e, std_z, ret, fix_ratio = res_estadistica
             
-            bias_n = leer_estado('opt_bias_n') or 0.0
-            bias_e = leer_estado('opt_bias_e') or 0.0
-            bias_z = leer_estado('opt_bias_z') or 0.0
+            bias_n = safe_f(leer_estado('opt_bias_n'), 0.0)
+            bias_e = safe_f(leer_estado('opt_bias_e'), 0.0)
+            bias_z = safe_f(leer_estado('opt_bias_z'), 0.0)
             
             if modo_str == "MODO_B_ASINCRONO" or modo_str == "MODO_D_DGPS":
-                nf_final = nf - bias_n
-                ef_final = ef - bias_e
-                zf_final_ground = zf - bias_z 
+                nf_final = float(nf) - float(bias_n)
+                ef_final = float(ef) - float(bias_e)
+                zf_final_ground = float(zf) - float(bias_z) 
                 shift_applied = True
             else:
-                nf_final = nf
-                ef_final = ef
-                zf_final_ground = zf - h_r     
+                nf_final = float(nf)
+                ef_final = float(ef)
+                zf_final_ground = float(zf) - float(h_r)     
                 shift_applied = False
             
             exec_time = time.time() - start_time
             
             p_dict = {
-                'mask': p_mask, 'cp': p_cp, 'ca': p_ca,
-                'max_gap': p_max_gap, 'snr': 0.0,
-                'err_h': err_hor_max, 'err_v': err_ver_max,
-                'nf': nf_final, 'ef': ef_final, 'zf': zf_final_ground, 
-                'ret': ret, 'total': len(coords), 'std_n': std_n, 'std_e': std_e, 'std_z': std_z,
-                'ez': std_z, 'fix_r': fix_ratio, 'pdop': global_pdop, 'lambda_ratio': global_lambda,
+                'mask': float(p_mask), 'cp': float(p_cp), 'ca': float(p_ca),
+                'max_gap': float(p_max_gap), 'snr': 0.0,
+                'err_h': float(err_hor_max), 'err_v': float(err_ver_max),
+                'nf': float(nf_final), 'ef': float(ef_final), 'zf': float(zf_final_ground), 
+                'ret': int(ret), 'total': len(coords), 'std_n': float(std_n), 'std_e': float(std_e), 'std_z': float(std_z),
+                'ez': float(std_z), 'fix_r': float(fix_ratio), 'pdop': float(global_pdop), 'lambda_ratio': float(global_lambda),
                 'base_file': leer_estado('name_base_raw') or "Drive_Base.obs",
                 'rover_file': rf_nuevo_filename,
                 'nav_file': leer_estado('name_nav_file') or "auto_nav.nav",
                 'sp3_file': leer_estado('name_sp3_file'),
-                'b_n': utm_n, 'b_e': utm_e, 'b_z': utm_c,
-                'r_n_calc': nf_final, 'r_e_calc': ef_final, 'r_z_calc': zf_final_ground,
-                'utm_h': utm_h, 'utm_hem': utm_hem,
-                'estrategia': estrategia,
-                'shift_applied': shift_applied,
-                'bias_n': bias_n, 'bias_e': bias_e, 'bias_z': bias_z,
-                't_exec': exec_time
+                'b_n': float(utm_n), 'b_e': float(utm_e), 'b_z': float(utm_c),
+                'r_n_calc': float(nf_final), 'r_e_calc': float(ef_final), 'r_z_calc': float(zf_final_ground),
+                'utm_h': int(utm_h), 'utm_hem': str(utm_hem),
+                'estrategia': str(estrategia),
+                'shift_applied': bool(shift_applied),
+                'bias_n': float(bias_n), 'bias_e': float(bias_e), 'bias_z': float(bias_z),
+                't_exec': float(exec_time)
             }
             
             yield "[PROGRESO] Ajuste Vectorial Finalizado.\n"
