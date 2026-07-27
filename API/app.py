@@ -29,9 +29,6 @@ os.makedirs(REPORT_FOLDER, exist_ok=True)
 STATE_LOCK = threading.Lock()
 SP3_LOCK = threading.Lock() 
 
-# Variable Global para interrupción controlada de la Caja Negra (Malla EKF/IRLS)
-ESTADO_INTERRUPCION = False
-
 # --- CONSTANTES GEODÉSICAS INMUTABLES ---
 C_LIGHT = 299792458.0
 OMEGA_E = 7.2921151467e-5
@@ -895,7 +892,8 @@ def suavizador_rts_backward(forward_states):
         
     return smoothed_states
 
-def procesar_ekF_lambda(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_mask):
+# MODIFICACIÓN: Inyección de geom_cache para evitar recalcular trigonometría orbital y mareas
+def procesar_ekF_lambda(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_mask, geom_cache=None):
     try:
         tow_b = sd_epoca.get('_tow_b', tr)
         
@@ -921,10 +919,16 @@ def procesar_ekF_lambda(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_mask)
         
         y_m, m_m, d_m, h_m, mn_m, sec_m = sd_epoca['_meta']
         
-        dx_tide, dy_tide, dz_tide = correccion_mareas_solidas(
-            kf_estado['X_base'][0], kf_estado['X_base'][1], kf_estado['X_base'][2], 
-            tow_b, y_m, m_m, d_m
-        )
+        if geom_cache is not None and tr in geom_cache and 'tide' in geom_cache[tr]:
+            dx_tide, dy_tide, dz_tide = geom_cache[tr]['tide']
+        else:
+            dx_tide, dy_tide, dz_tide = correccion_mareas_solidas(
+                kf_estado['X_base'][0], kf_estado['X_base'][1], kf_estado['X_base'][2], 
+                tow_b, y_m, m_m, d_m
+            )
+            if geom_cache is not None:
+                if tr not in geom_cache: geom_cache[tr] = {}
+                geom_cache[tr]['tide'] = (dx_tide, dy_tide, dz_tide)
         
         X_base_corr = kf_estado['X_base'][0] + dx_tide
         Y_base_corr = kf_estado['X_base'][1] + dy_tide
@@ -935,31 +939,41 @@ def procesar_ekF_lambda(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_mask)
         sat_positions = {}
         for s, d in sd_epoca.items():
             if s == '_meta' or s == '_tow_b' or d['sd_P'] is None: continue 
-            tau_r = d['pr_r'] / C_LIGHT
-            tau_b = d['pr_b'] / C_LIGHT
-            
-            t_emision_r = tr - tau_r
-            t_emision_b = tow_b - tau_b
             
             sp_r, sp_b = None, None
-            
-            if sp3 and s in sp3:
-                sp3_res_r = interpolate_sp3(sp3, s, t_emision_r)
-                sp3_res_b = interpolate_sp3(sp3, s, t_emision_b)
-                if sp3_res_r and sp3_res_b:
-                    theta_r = OMEGA_E * tau_r
-                    xs_r = sp3_res_r[0] * math.cos(theta_r) + sp3_res_r[1] * math.sin(theta_r)
-                    ys_r = -sp3_res_r[0] * math.sin(theta_r) + sp3_res_r[1] * math.cos(theta_r)
-                    sp_r = (xs_r, ys_r, sp3_res_r[2], sp3_res_r[3]) 
-                    
-                    theta_b = OMEGA_E * tau_b
-                    xs_b = sp3_res_b[0] * math.cos(theta_b) + sp3_res_b[1] * math.sin(theta_b)
-                    ys_b = -sp3_res_b[0] * math.sin(theta_b) + sp3_res_b[1] * math.cos(theta_b)
-                    sp_b = (xs_b, ys_b, sp3_res_b[2], sp3_res_b[3])
-            
-            if not sp_r or not sp_b:
-                sp_r = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), t_emision_r), t_emision_r, tau_r, s[0])
-                sp_b = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), t_emision_b), t_emision_b, tau_b, s[0])
+            if geom_cache is not None and tr in geom_cache and s in geom_cache[tr]:
+                sp_r = geom_cache[tr][s]['sp_r']
+                sp_b = geom_cache[tr][s]['sp_b']
+            else:
+                tau_r = d['pr_r'] / C_LIGHT
+                tau_b = d['pr_b'] / C_LIGHT
+                
+                t_emision_r = tr - tau_r
+                t_emision_b = tow_b - tau_b
+                
+                if sp3 and s in sp3:
+                    sp3_res_r = interpolate_sp3(sp3, s, t_emision_r)
+                    sp3_res_b = interpolate_sp3(sp3, s, t_emision_b)
+                    if sp3_res_r and sp3_res_b:
+                        theta_r = OMEGA_E * tau_r
+                        xs_r = sp3_res_r[0] * math.cos(theta_r) + sp3_res_r[1] * math.sin(theta_r)
+                        ys_r = -sp3_res_r[0] * math.sin(theta_r) + sp3_res_r[1] * math.cos(theta_r)
+                        sp_r = (xs_r, ys_r, sp3_res_r[2], sp3_res_r[3]) 
+                        
+                        theta_b = OMEGA_E * tau_b
+                        xs_b = sp3_res_b[0] * math.cos(theta_b) + sp3_res_b[1] * math.sin(theta_b)
+                        ys_b = -sp3_res_b[0] * math.sin(theta_b) + sp3_res_b[1] * math.cos(theta_b)
+                        sp_b = (xs_b, ys_b, sp3_res_b[2], sp3_res_b[3])
+                
+                if not sp_r or not sp_b:
+                    sp_r = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), t_emision_r), t_emision_r, tau_r, s[0])
+                    sp_b = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), t_emision_b), t_emision_b, tau_b, s[0])
+                
+                if geom_cache is not None:
+                    if tr not in geom_cache: geom_cache[tr] = {}
+                    if s not in geom_cache[tr]: geom_cache[tr][s] = {}
+                    geom_cache[tr][s]['sp_r'] = sp_r
+                    geom_cache[tr][s]['sp_b'] = sp_b
             
             if sp_r and sp_b:
                 el_r, az_r = calcular_topocentricas(sp_r[0], sp_r[1], sp_r[2], X_apc, Y_apc, Z_apc)
@@ -1110,12 +1124,20 @@ def procesar_ekF_lambda(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_mask)
 # =====================================================================
 # VÍA 2 -> MÓDULO B: MOTOR IRLS ASINCRÓNICO CON MAREAS Y SP3+NAV
 # =====================================================================
-def calcular_IRLS_MODO_B(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle):
+# MODIFICACIÓN: Inyección de geom_cache
+def calcular_IRLS_MODO_B(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom_cache=None):
     try:
         tow_b = sd_epoca.get('_tow_b', tr)
         y_m, m_m, d_m, h_m, mn_m, sec_m = sd_epoca['_meta']
         
-        dx_tide, dy_tide, dz_tide = correccion_mareas_solidas(X_b, Y_b, Z_b, tow_b, y_m, m_m, d_m)
+        if geom_cache is not None and tr in geom_cache and 'tide' in geom_cache[tr]:
+            dx_tide, dy_tide, dz_tide = geom_cache[tr]['tide']
+        else:
+            dx_tide, dy_tide, dz_tide = correccion_mareas_solidas(X_b, Y_b, Z_b, tow_b, y_m, m_m, d_m)
+            if geom_cache is not None:
+                if tr not in geom_cache: geom_cache[tr] = {}
+                geom_cache[tr]['tide'] = (dx_tide, dy_tide, dz_tide)
+        
         X_b_corr, Y_b_corr, Z_b_corr = X_b + dx_tide, Y_b + dy_tide, Z_b + dz_tide
         
         X_iter, Y_iter, Z_iter = X_b_corr, Y_b_corr, Z_b_corr 
@@ -1128,20 +1150,28 @@ def calcular_IRLS_MODO_B(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle):
         for s, d in sd_epoca.items():
             if s == '_meta' or s == '_tow_b' or d['sd_P'] is None: continue 
             
-            tau_r = d['pr_r'] / C_LIGHT
-            t_emision_r = tr - tau_r
-            
             sp_r = None
-            if sp3 and s in sp3:
-                sp3_res_r = interpolate_sp3(sp3, s, t_emision_r)
-                if sp3_res_r:
-                    theta_r = OMEGA_E * tau_r
-                    xs_r = sp3_res_r[0] * math.cos(theta_r) + sp3_res_r[1] * math.sin(theta_r)
-                    ys_r = -sp3_res_r[0] * math.sin(theta_r) + sp3_res_r[1] * math.cos(theta_r)
-                    sp_r = (xs_r, ys_r, sp3_res_r[2], sp3_res_r[3])
+            if geom_cache is not None and tr in geom_cache and s in geom_cache[tr]:
+                sp_r = geom_cache[tr][s]['sp_r']
+            else:
+                tau_r = d['pr_r'] / C_LIGHT
+                t_emision_r = tr - tau_r
+                
+                if sp3 and s in sp3:
+                    sp3_res_r = interpolate_sp3(sp3, s, t_emision_r)
+                    if sp3_res_r:
+                        theta_r = OMEGA_E * tau_r
+                        xs_r = sp3_res_r[0] * math.cos(theta_r) + sp3_res_r[1] * math.sin(theta_r)
+                        ys_r = -sp3_res_r[0] * math.sin(theta_r) + sp3_res_r[1] * math.cos(theta_r)
+                        sp_r = (xs_r, ys_r, sp3_res_r[2], sp3_res_r[3])
+                        
+                if not sp_r:
+                    sp_r = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), t_emision_r), t_emision_r, tau_r, s[0])
                     
-            if not sp_r:
-                sp_r = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), t_emision_r), t_emision_r, tau_r, s[0])
+                if geom_cache is not None:
+                    if tr not in geom_cache: geom_cache[tr] = {}
+                    if s not in geom_cache[tr]: geom_cache[tr][s] = {}
+                    geom_cache[tr][s]['sp_r'] = sp_r
                 
             if sp_r:
                 el_r, az_r = calcular_topocentricas(sp_r[0], sp_r[1], sp_r[2], X_iter, Y_iter, Z_iter)
@@ -1270,7 +1300,8 @@ def calcular_IRLS_MODO_B(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle):
 # =====================================================================
 # VÍA 3 -> MÓDULO C: NUEVO MOTOR PPK L1+L5 (DOBLE FRECUENCIA SIMULTÁNEA)
 # =====================================================================
-def procesar_ekF_PPK_L1_L5(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_mask):
+# MODIFICACIÓN: Inyección de geom_cache
+def procesar_ekF_PPK_L1_L5(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_mask, geom_cache=None):
     try:
         tow_b = sd_epoca.get('_tow_b', tr)
         
@@ -1291,7 +1322,15 @@ def procesar_ekF_PPK_L1_L5(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_ma
         alpha, beta = nav.get('_iono', {}).get('alpha', [0]*4), nav.get('_iono', {}).get('beta', [0]*4)
         
         y_m, m_m, d_m, h_m, mn_m, sec_m = sd_epoca['_meta']
-        dx_tide, dy_tide, dz_tide = correccion_mareas_solidas(kf_estado['X_base'][0], kf_estado['X_base'][1], kf_estado['X_base'][2], tow_b, y_m, m_m, d_m)
+        
+        if geom_cache is not None and tr in geom_cache and 'tide' in geom_cache[tr]:
+            dx_tide, dy_tide, dz_tide = geom_cache[tr]['tide']
+        else:
+            dx_tide, dy_tide, dz_tide = correccion_mareas_solidas(kf_estado['X_base'][0], kf_estado['X_base'][1], kf_estado['X_base'][2], tow_b, y_m, m_m, d_m)
+            if geom_cache is not None:
+                if tr not in geom_cache: geom_cache[tr] = {}
+                geom_cache[tr]['tide'] = (dx_tide, dy_tide, dz_tide)
+                
         X_base_corr, Y_base_corr, Z_base_corr = kf_estado['X_base'][0] + dx_tide, kf_estado['X_base'][1] + dy_tide, kf_estado['X_base'][2] + dz_tide
         lat_base, lon_base, alt_base = ecef_a_geodesicas(X_base_corr, Y_base_corr, Z_base_corr)
         
@@ -1299,22 +1338,32 @@ def procesar_ekF_PPK_L1_L5(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_ma
         for s, d in sd_epoca.items():
             if s == '_meta' or s == '_tow_b' or 'C1' not in d or d['C1']['sd_P'] is None: continue 
             
-            tau_r = d['C1']['pr_r'] / C_LIGHT 
-            tau_b = d['C1']['pr_b'] / C_LIGHT
-            t_emision_r, t_emision_b = tr - tau_r, tow_b - tau_b
-            
             sp_r, sp_b = None, None
-            if sp3 and s in sp3:
-                sp3_res_r, sp3_res_b = interpolate_sp3(sp3, s, t_emision_r), interpolate_sp3(sp3, s, t_emision_b)
-                if sp3_res_r and sp3_res_b:
-                    theta_r, theta_b = OMEGA_E * tau_r, OMEGA_E * tau_b
-                    xs_r, ys_r = sp3_res_r[0] * math.cos(theta_r) + sp3_res_r[1] * math.sin(theta_r), -sp3_res_r[0] * math.sin(theta_r) + sp3_res_r[1] * math.cos(theta_r)
-                    xs_b, ys_b = sp3_res_b[0] * math.cos(theta_b) + sp3_res_b[1] * math.sin(theta_b), -sp3_res_b[0] * math.sin(theta_b) + sp3_res_b[1] * math.cos(theta_b)
-                    sp_r, sp_b = (xs_r, ys_r, sp3_res_r[2], sp3_res_r[3]), (xs_b, ys_b, sp3_res_b[2], sp3_res_b[3])
-            
-            if not sp_r or not sp_b:
-                sp_r = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), t_emision_r), t_emision_r, tau_r, s[0])
-                sp_b = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), t_emision_b), t_emision_b, tau_b, s[0])
+            if geom_cache is not None and tr in geom_cache and s in geom_cache[tr]:
+                sp_r = geom_cache[tr][s]['sp_r']
+                sp_b = geom_cache[tr][s]['sp_b']
+            else:
+                tau_r = d['C1']['pr_r'] / C_LIGHT 
+                tau_b = d['C1']['pr_b'] / C_LIGHT
+                t_emision_r, t_emision_b = tr - tau_r, tow_b - tau_b
+                
+                if sp3 and s in sp3:
+                    sp3_res_r, sp3_res_b = interpolate_sp3(sp3, s, t_emision_r), interpolate_sp3(sp3, s, t_emision_b)
+                    if sp3_res_r and sp3_res_b:
+                        theta_r, theta_b = OMEGA_E * tau_r, OMEGA_E * tau_b
+                        xs_r, ys_r = sp3_res_r[0] * math.cos(theta_r) + sp3_res_r[1] * math.sin(theta_r), -sp3_res_r[0] * math.sin(theta_r) + sp3_res_r[1] * math.cos(theta_r)
+                        xs_b, ys_b = sp3_res_b[0] * math.cos(theta_b) + sp3_res_b[1] * math.sin(theta_b), -sp3_res_b[0] * math.sin(theta_b) + sp3_res_b[1] * math.cos(theta_b)
+                        sp_r, sp_b = (xs_r, ys_r, sp3_res_r[2], sp3_res_r[3]), (xs_b, ys_b, sp3_res_b[2], sp3_res_b[3])
+                
+                if not sp_r or not sp_b:
+                    sp_r = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), t_emision_r), t_emision_r, tau_r, s[0])
+                    sp_b = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), t_emision_b), t_emision_b, tau_b, s[0])
+                
+                if geom_cache is not None:
+                    if tr not in geom_cache: geom_cache[tr] = {}
+                    if s not in geom_cache[tr]: geom_cache[tr][s] = {}
+                    geom_cache[tr][s]['sp_r'] = sp_r
+                    geom_cache[tr][s]['sp_b'] = sp_b
             
             if sp_r and sp_b:
                 el_r, az_r = calcular_topocentricas(sp_r[0], sp_r[1], sp_r[2], X_apc, Y_apc, Z_apc)
@@ -1447,12 +1496,20 @@ def procesar_ekF_PPK_L1_L5(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_ma
 # =====================================================================
 # VÍA 4 -> MÓDULO D: NUEVO MOTOR DGPS ESTRICTO CÓDIGO PURO (C1/C5 SIN FASE)
 # =====================================================================
-def calcular_IRLS_MODO_D(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle):
+# MODIFICACIÓN: Inyección de geom_cache
+def calcular_IRLS_MODO_D(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom_cache=None):
     try:
         tow_b = sd_epoca.get('_tow_b', tr)
         y_m, m_m, d_m, h_m, mn_m, sec_m = sd_epoca['_meta']
         
-        dx_tide, dy_tide, dz_tide = correccion_mareas_solidas(X_b, Y_b, Z_b, tow_b, y_m, m_m, d_m)
+        if geom_cache is not None and tr in geom_cache and 'tide' in geom_cache[tr]:
+            dx_tide, dy_tide, dz_tide = geom_cache[tr]['tide']
+        else:
+            dx_tide, dy_tide, dz_tide = correccion_mareas_solidas(X_b, Y_b, Z_b, tow_b, y_m, m_m, d_m)
+            if geom_cache is not None:
+                if tr not in geom_cache: geom_cache[tr] = {}
+                geom_cache[tr]['tide'] = (dx_tide, dy_tide, dz_tide)
+                
         X_b_corr, Y_b_corr, Z_b_corr = X_b + dx_tide, Y_b + dy_tide, Z_b + dz_tide
         
         X_iter, Y_iter, Z_iter = X_b_corr, Y_b_corr, Z_b_corr 
@@ -1465,20 +1522,28 @@ def calcular_IRLS_MODO_D(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle):
         for s, d in sd_epoca.items():
             if s == '_meta' or s == '_tow_b' or d['sd_P'] is None: continue 
             
-            tau_r = d['pr_r'] / C_LIGHT
-            t_emision_r = tr - tau_r
-            
             sp_r = None
-            if sp3 and s in sp3:
-                sp3_res_r = interpolate_sp3(sp3, s, t_emision_r)
-                if sp3_res_r:
-                    theta_r = OMEGA_E * tau_r
-                    xs_r = sp3_res_r[0] * math.cos(theta_r) + sp3_res_r[1] * math.sin(theta_r)
-                    ys_r = -sp3_res_r[0] * math.sin(theta_r) + sp3_res_r[1] * math.cos(theta_r)
-                    sp_r = (xs_r, ys_r, sp3_res_r[2], sp3_res_r[3])
+            if geom_cache is not None and tr in geom_cache and s in geom_cache[tr]:
+                sp_r = geom_cache[tr][s]['sp_r']
+            else:
+                tau_r = d['pr_r'] / C_LIGHT
+                t_emision_r = tr - tau_r
+                
+                if sp3 and s in sp3:
+                    sp3_res_r = interpolate_sp3(sp3, s, t_emision_r)
+                    if sp3_res_r:
+                        theta_r = OMEGA_E * tau_r
+                        xs_r = sp3_res_r[0] * math.cos(theta_r) + sp3_res_r[1] * math.sin(theta_r)
+                        ys_r = -sp3_res_r[0] * math.sin(theta_r) + sp3_res_r[1] * math.cos(theta_r)
+                        sp_r = (xs_r, ys_r, sp3_res_r[2], sp3_res_r[3])
+                        
+                if not sp_r:
+                    sp_r = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), t_emision_r), t_emision_r, tau_r, s[0])
                     
-            if not sp_r:
-                sp_r = calcular_posicion_satelite_wgs84(seleccionar_efemeride_optima(nav.get(s), t_emision_r), t_emision_r, tau_r, s[0])
+                if geom_cache is not None:
+                    if tr not in geom_cache: geom_cache[tr] = {}
+                    if s not in geom_cache[tr]: geom_cache[tr][s] = {}
+                    geom_cache[tr][s]['sp_r'] = sp_r
                 
             if sp_r:
                 el_r, az_r = calcular_topocentricas(sp_r[0], sp_r[1], sp_r[2], X_iter, Y_iter, Z_iter)
@@ -1841,10 +1906,11 @@ def index():
     index_path = os.path.join(base_dir, 'index.html')
     return send_file(index_path)
 
+# MODIFICACIÓN: Interrupción Cross-Process usando flag file para aislar variables entre workers
 @app.route('/API/interrumpir', methods=['POST'])
 def interrumpir_proceso():
-    global ESTADO_INTERRUPCION
-    ESTADO_INTERRUPCION = True
+    with open(os.path.join(UPLOAD_FOLDER, 'interrupt.flag'), 'w') as f:
+        f.write("1")
     return Response("Interrumpido", status=200)
 
 @app.route('/API/tab1_homogenizar', methods=['POST'])
@@ -2029,10 +2095,13 @@ def tab2_efemerides():
 
 @app.route('/API/tab3_calibrar', methods=['POST'])
 def tab3_calibrar():
-    global ESTADO_INTERRUPCION
-    ESTADO_INTERRUPCION = False
-    
     start_time = time.time()
+    
+    # MODIFICACIÓN: Reset de bandera de interrupción en memoria cruzada
+    flag_file = os.path.join(UPLOAD_FOLDER, 'interrupt.flag')
+    if os.path.exists(flag_file):
+        os.remove(flag_file)
+        
     utm_n = leer_estado('utm_norte')
     utm_e = leer_estado('utm_este')
     utm_c = leer_estado('utm_cota')
@@ -2046,11 +2115,11 @@ def tab3_calibrar():
 
     p_max_gap = safe_f(request.form.get('param_max_gap'), 0.5)
     p_snr = safe_f(request.form.get('param_snr'), 25.0)
-    p_iter = safe_i(request.form.get('param_iter'), 6)
-    p_iter = max(1, p_iter) 
+    
+    # MODIFICACIÓN: Freno estricto backend a 4 iteraciones
+    p_iter = min(4, max(1, safe_i(request.form.get('param_iter'), 4)))
 
     def procesar():
-        global ESTADO_INTERRUPCION
         try:
             if utm_e == 0.0 or utm_n == 0.0 or utm_n_r == 0.0 or utm_e_r == 0.0: 
                 yield "> [ERROR] Coordenadas Base y Rover no inyectadas correctamente.\n"; return
@@ -2085,6 +2154,9 @@ def tab3_calibrar():
             X_b, Y_b, Z_b = geodesicas_a_ecef(lat_b, lon_b, utm_c + h_b)
             X_bg, Y_bg, Z_bg = geodesicas_a_ecef(lat_b, lon_b, utm_c)
 
+            # MODIFICACIÓN: Inicialización de Caché Geométrico para RAM
+            geom_cache = {}
+
             # =========================================================
             # MÓDULOS A Y C (PPK CON FASE)
             # =========================================================
@@ -2099,31 +2171,31 @@ def tab3_calibrar():
                 t_sample_full = list(sd_suavizada.keys())
                 total_eps = len(t_sample_full)
                 step = max(1, total_eps // 60)
-                t_sample = t_sample_full[::step][:60] # [CORRECCIÓN]: Reducido de 300 a 60 épocas para estabilizar la carga CPU
+                t_sample = t_sample_full[::step][:60]
                 
-                yield f"[PROGRESO OPTIMIZADOR RENDER] Decimación Dinámica Activa:\n"
+                yield f"[PROGRESO OPTIMIZADOR RENDER] Decimación Dinámica y Pre-Cálculo Orbital:\n"
                 yield f"  [-] Épocas totales en archivo: {total_eps}\n"
                 yield f"  [-] Épocas estadísticas a evaluar: {len(t_sample)} (Salto: 1 cada {step})\n"
                 
-                yield "[PROGRESO] Fase 1: Extracción de Límites (Pre-Scan EKF)...\n"
+                yield "[PROGRESO] Fase 1: Extracción de Límites y Poblando Caché en RAM...\n"
                 P_init = matid(3)
                 for i in range(3): P_init[i][i] = 100.0
                 kf_estado_raw = {'X': [[X_bg], [Y_bg], [Z_bg]], 'P': P_init, 'X_base': (X_b, Y_b, Z_b), 'fix_flags': 0, 'h_r': h_r}
                 coords_raw = []
                 
                 for t in t_sample:
-                    if ESTADO_INTERRUPCION: break
+                    if os.path.exists(flag_file): break
                     if modo_str == "MODO_A_CODIGO":
-                        sem, status, kf_estado_raw, _, _ = procesar_ekF_lambda(sd_suavizada[t], nav, sp3, kf_estado_raw, t, 10.0, p_snr)
+                        sem, status, kf_estado_raw, _, _ = procesar_ekF_lambda(sd_suavizada[t], nav, sp3, kf_estado_raw, t, 10.0, p_snr, geom_cache=geom_cache)
                     else:
-                        sem, status, kf_estado_raw, _, _ = procesar_ekF_PPK_L1_L5(sd_suavizada[t], nav, sp3, kf_estado_raw, t, 10.0, p_snr)
+                        sem, status, kf_estado_raw, _, _ = procesar_ekF_PPK_L1_L5(sd_suavizada[t], nav, sp3, kf_estado_raw, t, 10.0, p_snr, geom_cache=geom_cache)
                         
                     if sem:
                         la, lo, al = ecef_a_geodesicas(sem[0], sem[1], sem[2])
                         nt, et = geodesicas_a_utm(la, lo, utm_h)
                         coords_raw.append((nt, et, al, status))
                 
-                if ESTADO_INTERRUPCION: yield "\n[!] Operación interrumpida prematuramente por el operador.\n"
+                if os.path.exists(flag_file): yield "\n[!] Operación interrumpida prematuramente por el operador.\n"
                 if not coords_raw: yield "> [ERROR] Filtro de Kalman colapsado en Pre-Scan.\n"; return
                 
                 deltas_h = sorted([math.hypot(c[0] - utm_n_r, c[1] - utm_e_r) for c in coords_raw])
@@ -2135,7 +2207,7 @@ def tab3_calibrar():
                 yield f"  [*] Límite Horizontal EKF Inyectado: {f_14(best_eh)} m\n"
                 yield f"  [*] Límite Vertical EKF Inyectado: {f_14(best_ev)} m\n\n"
                 
-                yield f"[PROGRESO] Fase 2: Malla Pentadimensional EKF (Iteraciones: {p_iter})...\n"
+                yield f"[PROGRESO] Fase 2: Malla Pentadimensional EKF (Iteraciones Aceleradas: {p_iter})...\n"
                 global_best_score = float('inf')
                 best_rmse = float('inf')
                 best_params = {}
@@ -2146,8 +2218,9 @@ def tab3_calibrar():
                 snr_center, snr_span = p_snr, 5.0
                 gap_center, gap_span = p_max_gap, 0.02
                 
+                time_out = False
                 for nivel in range(p_iter):
-                    if ESTADO_INTERRUPCION: break
+                    if time_out or os.path.exists(flag_file): break
                     yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{p_iter})...\n"
                     m_grid = [max(1.0, min(25.0, x)) for x in [m_center - m_span, m_center, m_center + m_span]]
                     cp_grid = [max(0.1, min(5.0, x)) for x in [cp_center - cp_span, cp_center, cp_center + cp_span]]
@@ -2159,19 +2232,27 @@ def tab3_calibrar():
                     nivel_best_params = {}
                     
                     for gap in set(gap_grid):
-                        if ESTADO_INTERRUPCION: break
+                        if time_out or os.path.exists(flag_file): break
                         for m in set(m_grid):
-                            if ESTADO_INTERRUPCION: break
+                            if time_out or os.path.exists(flag_file): break
                             for snr in set(snr_grid):
-                                if ESTADO_INTERRUPCION: break
+                                if time_out or os.path.exists(flag_file): break
+                                
+                                # MODIFICACIÓN: Time-boxing de 26 segundos
+                                if time.time() - start_time > 26.0:
+                                    yield "\n> [ALERTA] Salvavidas Time-Box (26.0s) activado. Abortando iteraciones para evitar Error 504.\n"
+                                    time_out = True
+                                    break
+
                                 kf_est = {'X': [[X_bg], [Y_bg], [Z_bg]], 'P': P_init, 'X_base': (X_b, Y_b, Z_b), 'fix_flags': 0, 'h_r': h_r}
                                 coords = []
                                 for t in t_sample:
-                                    if ESTADO_INTERRUPCION: break
+                                    if time_out or os.path.exists(flag_file): break
+                                    
                                     if modo_str == "MODO_A_CODIGO":
-                                        sem, status, kf_est, _, _ = procesar_ekF_lambda(sd_suavizada[t], nav, sp3, kf_est, t, m, snr)
+                                        sem, status, kf_est, _, _ = procesar_ekF_lambda(sd_suavizada[t], nav, sp3, kf_est, t, m, snr, geom_cache=geom_cache)
                                     else:
-                                        sem, status, kf_est, _, _ = procesar_ekF_PPK_L1_L5(sd_suavizada[t], nav, sp3, kf_est, t, m, snr)
+                                        sem, status, kf_est, _, _ = procesar_ekF_PPK_L1_L5(sd_suavizada[t], nav, sp3, kf_est, t, m, snr, geom_cache=geom_cache)
                                         
                                     if sem:
                                         la, lo, al = ecef_a_geodesicas(sem[0], sem[1], sem[2])
@@ -2197,7 +2278,7 @@ def tab3_calibrar():
                                                 best_rmse = rmse_3d
                                                 best_params = {'mask': m, 'cp': cp, 'ca': ca, 'eh': best_eh, 'ev': best_ev, 'max_gap': gap, 'snr': snr, 'rmse': rmse_3d, 'ret': ret, 'dn': nf - utm_n_r, 'de': ef - utm_e_r, 'dz': zf - utm_c_r}
                     
-                    if nivel_best_rmse != float('inf'):
+                    if nivel_best_rmse != float('inf') and not time_out:
                         yield f"  [*] Fin Iteración {nivel+1} | Mejor RMSE Local: {f_14(nivel_best_params['rmse'])} m\n"
                     
                     if global_best_score != float('inf'):
@@ -2224,23 +2305,23 @@ def tab3_calibrar():
                 step = max(1, total_eps // 60)
                 t_sample = t_sample_full[::step][:60]
                 
-                yield f"[PROGRESO OPTIMIZADOR RENDER] Decimación Dinámica Activa:\n"
+                yield f"[PROGRESO OPTIMIZADOR RENDER] Decimación Dinámica Activa y Caché en RAM:\n"
                 yield f"  [-] Épocas totales en archivo: {total_eps}\n"
                 yield f"  [-] Épocas estadísticas a evaluar: {len(t_sample)} (Salto: 1 cada {step})\n"
                 
-                yield "[PROGRESO] Fase 1: Extracción de Límites (Pre-Scan Clásico IRLS)...\n"
+                yield "[PROGRESO] Fase 1: Extracción de Límites y Poblando Caché (Pre-Scan Clásico IRLS)...\n"
                 coords_raw = []
                 for t in t_sample:
-                    if ESTADO_INTERRUPCION: break
-                    if modo_str == "MODO_D_DGPS": sem, status, _ = calcular_IRLS_MODO_D(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, 10.0)
-                    else: sem, status, _ = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, 10.0)
+                    if os.path.exists(flag_file): break
+                    if modo_str == "MODO_D_DGPS": sem, status, _ = calcular_IRLS_MODO_D(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, 10.0, geom_cache=geom_cache)
+                    else: sem, status, _ = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, 10.0, geom_cache=geom_cache)
                     
                     if sem:
                         la, lo, al = ecef_a_geodesicas(sem[0], sem[1], sem[2])
                         nt, et = geodesicas_a_utm(la, lo, utm_h)
                         coords_raw.append((nt, et, al, status))
                 
-                if ESTADO_INTERRUPCION: yield "\n[!] Operación interrumpida prematuramente por el operador.\n"
+                if os.path.exists(flag_file): yield "\n[!] Operación interrumpida prematuramente por el operador.\n"
                 if not coords_raw: yield "> [ERROR] Nube de puntos bruta colapsada en Pre-Scan.\n"; return
                 
                 deltas_h = sorted([math.hypot(c[0] - utm_n_r, c[1] - utm_e_r) for c in coords_raw])
@@ -2252,7 +2333,7 @@ def tab3_calibrar():
                 yield f"  [*] Límite Horizontal IRLS Inyectado: {f_14(best_eh)} m\n"
                 yield f"  [*] Límite Vertical IRLS Inyectado: {f_14(best_ev)} m\n\n"
                 
-                yield f"[PROGRESO] Fase 2: Malla Tridimensional Clásica (Iteraciones: {p_iter})...\n"
+                yield f"[PROGRESO] Fase 2: Malla Tridimensional Clásica (Iteraciones Aceleradas: {p_iter})...\n"
                 global_best_score = float('inf')
                 best_rmse = float('inf')
                 best_params = {}
@@ -2261,8 +2342,9 @@ def tab3_calibrar():
                 cp_center, cp_span = 2.0, 1.5
                 ca_center, ca_span = 2.0, 1.5
                 
+                time_out = False
                 for nivel in range(p_iter):
-                    if ESTADO_INTERRUPCION: break
+                    if time_out or os.path.exists(flag_file): break
                     yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{p_iter})...\n"
                     m_grid = [max(5.0, min(15.0, x)) for x in [m_center - m_span, m_center, m_center + m_span]]
                     cp_grid = [max(0.1, min(5.0, x)) for x in [cp_center - cp_span, cp_center, cp_center + cp_span]]
@@ -2272,12 +2354,20 @@ def tab3_calibrar():
                     nivel_best_params = {}
                     
                     for m in set(m_grid):
-                        if ESTADO_INTERRUPCION: break
+                        if time_out or os.path.exists(flag_file): break
+                        
+                        # MODIFICACIÓN: Time-boxing de 26 segundos
+                        if time.time() - start_time > 26.0:
+                            yield "\n> [ALERTA] Salvavidas Time-Box (26.0s) activado. Abortando iteraciones para evitar Error 504.\n"
+                            time_out = True
+                            break
+
                         coords = []
                         for t in t_sample:
-                            if ESTADO_INTERRUPCION: break
-                            if modo_str == "MODO_D_DGPS": sem, status, _ = calcular_IRLS_MODO_D(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, m)
-                            else: sem, status, _ = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, m)
+                            if time_out or os.path.exists(flag_file): break
+                            
+                            if modo_str == "MODO_D_DGPS": sem, status, _ = calcular_IRLS_MODO_D(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, m, geom_cache=geom_cache)
+                            else: sem, status, _ = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, m, geom_cache=geom_cache)
                             
                             if sem:
                                 la, lo, al = ecef_a_geodesicas(sem[0], sem[1], sem[2])
@@ -2301,7 +2391,7 @@ def tab3_calibrar():
                                         best_rmse = rmse_3d
                                         best_params = {'mask': m, 'cp': cp, 'ca': ca, 'eh': best_eh, 'ev': best_ev, 'max_gap': p_max_gap, 'snr': p_snr, 'rmse': rmse_3d, 'ret': ret, 'dn': nf - utm_n_r, 'de': ef - utm_e_r, 'dz': zf - utm_c_r}
                     
-                    if nivel_best_rmse != float('inf'):
+                    if nivel_best_rmse != float('inf') and not time_out:
                         yield f"  [*] Fin Iteración {nivel+1} | Mejor RMSE Local: {f_14(nivel_best_params['rmse'])} m\n"
                         
                     if global_best_score != float('inf'):
@@ -2329,8 +2419,8 @@ def tab3_calibrar():
                 fecha_calculo = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 t_exec_script = time.time() - start_time
 
-                if ESTADO_INTERRUPCION:
-                    yield "\n> [SISTEMA] EL OPERADOR HA FORZADO LA DETENCIÓN. PROCEDIENDO A EXTRAER EL MEJOR DATO RECOPILADO...\n"
+                if os.path.exists(flag_file) or time_out:
+                    yield "\n> [SISTEMA] SE FORZÓ LA DETENCIÓN DEL BUCLE. PROCEDIENDO A EXTRAER EL MEJOR DATO RECOPILADO...\n"
 
                 yield "\n========================================================\n"
                 yield f"      [INFORME] PARÁMETROS ÓPTIMOS ({modo_str})\n"
@@ -2355,7 +2445,7 @@ def tab3_calibrar():
                 yield "========================================================\n"
                 yield "\n[SUCCESS]"
             else:
-                yield "\n> [ERROR] El modelo no convergió. Filtros demasiado agresivos.\n"
+                yield "\n> [ERROR] El modelo no convergió. Filtros demasiado agresivos o Timeout temprano.\n"
         except Exception as e: yield f"\n> [ERROR FATAL] {str(e)}"
     return Response(procesar(), mimetype='text/plain')
 
@@ -2463,9 +2553,9 @@ def tab4_procesar():
                         yield f"[PROGRESO] Propagando Matriz Covarianza... {int((c / t_eps) * 100)}%\n"
                         
                     if modo_str == "MODO_A_CODIGO":
-                        sem, status, kf_est, st_dict, l_ratio = procesar_ekF_lambda(sd_suavizada[t], nav, sp3, kf_est, t, p_mask, p_snr)
+                        sem, status, kf_est, st_dict, l_ratio = procesar_ekF_lambda(sd_suavizada[t], nav, sp3, kf_est, t, p_mask, p_snr, geom_cache=None)
                     else:
-                        sem, status, kf_est, st_dict, l_ratio = procesar_ekF_PPK_L1_L5(sd_suavizada[t], nav, sp3, kf_est, t, p_mask, p_snr)
+                        sem, status, kf_est, st_dict, l_ratio = procesar_ekF_PPK_L1_L5(sd_suavizada[t], nav, sp3, kf_est, t, p_mask, p_snr, geom_cache=None)
                         
                     if sem and st_dict:
                         st_dict['status'] = status
@@ -2516,8 +2606,8 @@ def tab4_procesar():
                     c += 1
                     if c % max(1, t_eps // 10) == 0: yield f"[PROGRESO] Resolviendo Matrices IRLS DGPS... {int((c / t_eps) * 100)}%\n"
                     
-                    if modo_str == "MODO_D_DGPS": sem, status, pdop_val = calcular_IRLS_MODO_D(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, p_mask)
-                    else: sem, status, pdop_val = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, p_mask)
+                    if modo_str == "MODO_D_DGPS": sem, status, pdop_val = calcular_IRLS_MODO_D(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, p_mask, geom_cache=None)
+                    else: sem, status, pdop_val = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, p_mask, geom_cache=None)
                     
                     if sem:
                         la, lo, al = ecef_a_geodesicas(sem[0], sem[1], sem[2])
