@@ -651,8 +651,6 @@ def analizar_calidad_y_senales_rinex(obs_b, obs_r, modo_hardware="iguales"):
     total_eval = max(len(tows_b), len(tows_r))
     ratio_sync = (sync_epochs / total_eval) if total_eval > 0 else 0.0
     
-    # REGLA DEFINIDA POR EL USUARIO EN LA INTERFAZ:
-    # iguales = MODO_D_DGPS | diferentes = MODO_B_ASINCRONO
     if modo_hardware == "iguales":
         return "MODO_D_DGPS", ratio_sync, "Modo seleccionado por interfaz: Teléfonos iguales -> Enrutando a Módulo D (DGPS)."
     else:
@@ -1321,7 +1319,6 @@ def tab1_homogenizar():
             shutil.rmtree(UPLOAD_FOLDER, ignore_errors=True)
         os.makedirs(UPLOAD_FOLDER, exist_ok=True)
     
-    # CAPTURA SEGURA DENTRO DEL CONTEXTO ACTIVO DE LA PETICIÓN HTTP
     url_base = request.form.get('url_base')
     url_rover = request.form.get('url_rover')
     
@@ -1552,9 +1549,6 @@ def tab3_calibrar():
 
             geom_cache = {}
 
-            # =========================================================
-            # MÓDULOS B (MODO_B_ASINCRONO) Y D (MODO_D_DGPS)
-            # =========================================================
             yield f"> [SISTEMA] Iniciando Búsqueda Determinista | {modo_str} (IRLS)...\n"
             if modo_str == "MODO_D_DGPS": sd_suavizada = aislar_diferencias_MODO_D(obs_b_raw, obs_r_raw)
             else: sd_suavizada = aislar_diferencias_MODO_B(obs_b_raw, obs_r_raw)
@@ -1728,7 +1722,6 @@ def tab4_procesar():
     p_snr = leer_estado('opt_snr')
     estrategia = leer_estado('estrategia_activa')
 
-    # CAPTURA SEGURA DENTRO DEL CONTEXTO ACTIVO DE LA PETICIÓN HTTP
     url_rover_nuevo = request.form.get('url_rover_nuevo')
     
     if p_mask is None or utm_n is None:
