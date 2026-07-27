@@ -1747,7 +1747,7 @@ def generar_informe_homogeneizacion_detallado(base_name, rover_name, base_raw, r
 [3] MATRIZ RESULTANTE (ESTRICTA, SIN INTERPOLACIÓN)
   [-] Épocas Útiles Sincronizadas: {es}
   [-] Tasa de Éxito sobre Rover  : {f_14(t_exito)}%
-  [-] Iteraciones Geométricas Sug: {sug_iter} (Basado en densidad)
+  [-] Iteraciones EKF Sugeridas  : {sug_iter} (Basado en densidad)
 
 [4] ENRUTADOR AUTOMÁTICO DE CÁLCULO
   [-] Módulo Asignado           : {modo_str}
