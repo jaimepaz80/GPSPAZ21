@@ -40,7 +40,7 @@ WAVE_L5 = C_LIGHT / FREQ_L5
 
 def f_14(val):
     if val is None: return "0.0"
-    s = f"{val:.14f}"
+    s = f"{float(val):.14f}"
     if '.' in s:
         s = s.rstrip('0')
         if s.endswith('.'): s += '0'
