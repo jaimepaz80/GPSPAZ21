@@ -2105,8 +2105,8 @@ def tab3_calibrar():
                 coords_raw = []
                 
                 for t in t_sample:
-                    if time.time() - start_time > 255.0:
-                        yield "  [!] WATCHDOG ACTIVADO (255s) EN PRE-SCAN. Interrumpiendo...\n"
+                    if time.time() - start_time > 14.0:
+                        yield "  [!] WATCHDOG ACTIVADO (14s) EN PRE-SCAN. Interrumpiendo...\n"
                         break
                     if modo_str == "MODO_A_CODIGO":
                         sem, status, kf_estado_raw, _, _ = procesar_ekF_lambda(sd_suavizada[t], nav, sp3, kf_estado_raw, t, 10.0, p_snr)
@@ -2162,9 +2162,9 @@ def tab3_calibrar():
                                 kf_est = {'X': [[X_bg], [Y_bg], [Z_bg]], 'P': P_init, 'X_base': (X_b, Y_b, Z_b), 'fix_flags': 0, 'h_r': h_r}
                                 coords = []
                                 for t in t_sample:
-                                    if time.time() - start_time > 255.0:
+                                    if time.time() - start_time > 14.0:
                                         if not timeout_triggered:
-                                            yield f"  [!] WATCHDOG ACTIVADO (255s) EN NÚCLEO EKF. Aplicando Early Stopping...\n"
+                                            yield f"  [!] WATCHDOG ACTIVADO (14s) EN NÚCLEO EKF. Aplicando Early Stopping...\n"
                                             timeout_triggered = True
                                         break
                                     if modo_str == "MODO_A_CODIGO":
@@ -2230,8 +2230,8 @@ def tab3_calibrar():
                 yield "[PROGRESO] Fase 1: Extracción de Límites (Pre-Scan Clásico IRLS)...\n"
                 coords_raw = []
                 for t in t_sample:
-                    if time.time() - start_time > 255.0:
-                        yield "  [!] WATCHDOG ACTIVADO (255s) EN PRE-SCAN IRLS. Interrumpiendo...\n"
+                    if time.time() - start_time > 14.0:
+                        yield "  [!] WATCHDOG ACTIVADO (14s) EN PRE-SCAN IRLS. Interrumpiendo...\n"
                         break
                     if modo_str == "MODO_D_DGPS": sem, status, _ = calcular_IRLS_MODO_D(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, 10.0)
                     else: sem, status, _ = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, 10.0)
@@ -2276,9 +2276,9 @@ def tab3_calibrar():
                         if timeout_triggered: break
                         coords = []
                         for t in t_sample:
-                            if time.time() - start_time > 255.0:
+                            if time.time() - start_time > 14.0:
                                 if not timeout_triggered:
-                                    yield f"  [!] WATCHDOG ACTIVADO (255s) EN NÚCLEO IRLS. Aplicando Early Stopping y rescatando datos...\n"
+                                    yield f"  [!] WATCHDOG ACTIVADO (14s) EN NÚCLEO IRLS. Aplicando Early Stopping y rescatando datos...\n"
                                     timeout_triggered = True
                                 break
                             if modo_str == "MODO_D_DGPS": sem, status, _ = calcular_IRLS_MODO_D(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, m)
