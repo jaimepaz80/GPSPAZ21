@@ -24,9 +24,9 @@
 
     <!-- MODAL DE PROGRESO (Caja Negra) -->
     <div id="progress-modal" class="fixed inset-0 bg-black bg-opacity-85 z-50 hidden flex flex-col items-center justify-center fade-in backdrop-blur-sm">
-        <div class="bg-gray-800 p-8 rounded-lg border border-purple-500 shadow-[0_0_40px_rgba(168,85,247,0.4)] w-11/12 max-w-lg text-center">
-            <h2 class="text-2xl font-bold text-purple-400 mb-2">CALIBRANDO MALLA PENTADIMENSIONAL</h2>
-            <p class="text-gray-400 text-sm mb-6">Ajustando Filtro de Kalman (EKF). Por favor, espere...</p>
+        <div class="bg-gray-800 p-8 rounded-lg border border-purple-500 shadow-[0_0_40px_rgba(168,85,247,0.4)] w-11/12 max-w-lg text-center" id="modal-content-box">
+            <h2 id="modal-title" class="text-2xl font-bold text-purple-400 mb-2">CALIBRANDO MALLA PENTADIMENSIONAL</h2>
+            <p id="modal-subtitle" class="text-gray-400 text-sm mb-6">Ajustando Filtro de Kalman (EKF). Por favor, espere...</p>
             
             <div class="w-full bg-gray-900 rounded-full h-8 mb-4 overflow-hidden border border-gray-600 shadow-inner">
                 <div id="progress-bar" class="bg-gradient-to-r from-purple-700 to-purple-400 h-8 rounded-full transition-all duration-300 ease-out flex items-center justify-center" style="width: 0%">
@@ -34,7 +34,21 @@
                 </div>
             </div>
             <p id="progress-status" class="text-purple-300 text-xs font-mono animate-pulse">Iniciando simulador Monte Carlo...</p>
-            <p id="progress-timer" class="text-white font-mono text-xl mt-3 font-bold drop-shadow-md transition-colors duration-300">Tiempo transcurrido: 00:00 / Límite: 04:15</p>
+            
+            <!-- Nuevos Cronómetros y Tiempos Estimados -->
+            <div class="mt-4 p-3 bg-gray-900 rounded border border-gray-700">
+                <p id="progress-timer" class="text-white font-mono text-xl font-bold drop-shadow-md transition-colors duration-300">Cronómetro: 00:00</p>
+                <p id="progress-eta" class="text-green-400 font-mono text-sm mt-1">Tiempo Estimado: Calculando...</p>
+            </div>
+
+            <!-- Botones de Control de Usuario -->
+            <div id="modal-controls" class="flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-3 mt-6">
+                <button type="button" onclick="cancelarCalibracion()" class="w-full bg-red-700 hover:bg-red-600 text-white font-bold py-2 px-4 rounded shadow-lg border border-red-500 transition">Cancelar Calibración</button>
+                <button type="button" onclick="pararYProcesar()" class="w-full bg-yellow-600 hover:bg-yellow-500 text-white font-bold py-2 px-4 rounded shadow-lg border border-yellow-400 transition">Parar y Procesar</button>
+            </div>
+            
+            <!-- Botón para cerrar Alerta (Oculto por defecto) -->
+            <button type="button" id="btn-cerrar-alerta" onclick="cerrarModalAlerta()" class="w-full bg-red-700 hover:bg-red-600 text-white font-bold py-2 px-4 rounded shadow-lg border border-red-500 transition mt-6 hidden">Cerrar Alerta</button>
         </div>
     </div>
 
@@ -174,7 +188,7 @@
                     </div>
                 </div>
 
-                <button type="submit" class="w-full bg-purple-600 hover:bg-purple-500 py-3 rounded font-bold transition text-lg mt-2 shadow-lg">Ejecutar Calibración Autónoma (Box Mode)</button>
+                <button type="submit" id="btn-submit-tab3" class="w-full bg-purple-600 hover:bg-purple-500 py-3 rounded font-bold transition text-lg mt-2 shadow-lg">Ejecutar Calibración Autónoma (Box Mode)</button>
             </form>
             <div id="console3" class="console p-4 mt-4 h-64 overflow-y-auto border border-gray-700 rounded"></div>
             <button id="btn-pdf-tab3" onclick="descargarTextoPDF('console3', 'Informe_Calibracion_RMSE')" class="hidden mt-4 bg-red-600 hover:bg-red-500 text-white font-bold py-2 px-4 rounded w-full shadow-lg">Descargar Informe de Calibración PDF</button>
@@ -225,6 +239,19 @@
         }
 
         let heartbeatTimer = null;
+        let globalAudioCtx = null;
+        let abortController = null;
+
+        // INICIALIZACIÓN DE AUDIO POSPUESTA PARA EVITAR BLOQUEO DE AUTOPLAY
+        function initAudio() {
+            if (!globalAudioCtx) {
+                const AudioContext = window.AudioContext || window.webkitAudioContext;
+                if (AudioContext) {
+                    globalAudioCtx = new AudioContext();
+                    if (globalAudioCtx.state === 'suspended') globalAudioCtx.resume();
+                }
+            }
+        }
 
         async function startSessionHeartbeat(user) {
             const beat = async () => {
@@ -233,6 +260,7 @@
                     const currentData = user.displayName;
                     if (currentData) {
                         const parts = currentData.split("_");
+                        // Validar estrictamente por token, no por tiempo local para evitar desincronización
                         if (parts.length === 2 && parts[1] !== localToken) {
                             stopSessionHeartbeat();
                             alert("SESIÓN FINALIZADA: Se ha iniciado sesión en otro dispositivo. Por seguridad, esta ventana se cerrará.");
@@ -264,11 +292,8 @@
                 if (currentData) {
                     const parts = currentData.split("_");
                     if (parts.length === 2) {
-                        const lastBeat = parseInt(parts[0]);
                         const activeToken = parts[1];
-                        const timeSinceLastBeat = Date.now() - lastBeat;
-
-                        if (activeToken !== localToken && timeSinceLastBeat < 90000) {
+                        if (activeToken !== localToken) {
                             isLockedOut = true;
                         }
                     }
@@ -364,32 +389,154 @@
             switchTab(1);
         }
 
-        // --- SISTEMA DE AUDIO (AVISO BEEP) ---
         function playSuccessBeep() {
             try {
-                const AudioContext = window.AudioContext || window.webkitAudioContext;
-                if (!AudioContext) return;
-                const ctx = new AudioContext();
-                const osc = ctx.createOscillator();
-                const gain = ctx.createGain();
+                if (!globalAudioCtx) return;
+                const osc = globalAudioCtx.createOscillator();
+                const gain = globalAudioCtx.createGain();
                 
                 osc.connect(gain);
-                gain.connect(ctx.destination);
+                gain.connect(globalAudioCtx.destination);
                 
                 osc.type = 'sine';
-                osc.frequency.setValueAtTime(880, ctx.currentTime); // Nota A5
+                osc.frequency.setValueAtTime(880, globalAudioCtx.currentTime);
                 
-                gain.gain.setValueAtTime(0.1, ctx.currentTime);
-                gain.gain.exponentialRampToValueAtTime(0.00001, ctx.currentTime + 0.6);
+                gain.gain.setValueAtTime(0.1, globalAudioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.00001, globalAudioCtx.currentTime + 0.6);
                 
-                osc.start(ctx.currentTime);
-                osc.stop(ctx.currentTime + 0.6);
-            } catch(e) { console.error("Audio bloqueado por navegador", e); }
+                osc.start(globalAudioCtx.currentTime);
+                osc.stop(globalAudioCtx.currentTime + 0.6);
+            } catch(e) { console.error(e); }
+        }
+
+        function calcularETA() {
+            const cons1 = document.getElementById('console1').textContent;
+            let epocasBase = 0;
+            let epocasRover = 0;
+            
+            const matchBase = cons1.match(/PARÁMETROS DE CONTROL \(BASE\).*\n.*Épocas Crudas Registradas\s*:\s*(\d+)/s);
+            if (matchBase) epocasBase = parseInt(matchBase[1]);
+            
+            const matchRover = cons1.match(/PARÁMETROS DEL MÓVIL \(ROVER\).*\n.*Épocas Crudas Registradas\s*:\s*(\d+)/s);
+            if (matchRover) epocasRover = parseInt(matchRover[1]);
+
+            const iterField = document.getElementById('param_iter');
+            const iteraciones = iterField ? parseInt(iterField.value) : 4;
+            
+            // Constante de peso matemático (Asumiendo malla reducida a 60 muestras)
+            let estimacionSegundos = Math.max(15, Math.floor((epocasBase + epocasRover) * 0.0005 * iteraciones)); 
+            
+            return estimacionSegundos;
+        }
+
+        function cancelarCalibracion() {
+            if (abortController) {
+                abortController.abort();
+                abortController = null;
+            }
+            const modal = document.getElementById('progress-modal');
+            modal.classList.add('hidden');
+            const display = document.getElementById('console3');
+            display.textContent += "\n[!] Operación cancelada por el usuario.\n";
+            desbloquearFormulario(3);
+        }
+
+        async function pararYProcesar() {
+            try {
+                const btn = document.querySelector('button[onclick="pararYProcesar()"]');
+                btn.disabled = true;
+                btn.innerText = "Interrumpiendo...";
+                await fetch('/API/interrumpir', { method: 'POST' });
+            } catch(e) { console.error("Error al interrumpir:", e); }
+        }
+
+        function cerrarModalAlerta() {
+            document.getElementById('progress-modal').classList.add('hidden');
+            desbloquearFormulario(3);
+        }
+
+        function lanzarAlertaRoja() {
+            const modalBox = document.getElementById('modal-content-box');
+            const title = document.getElementById('modal-title');
+            const sub = document.getElementById('modal-subtitle');
+            const pBar = document.getElementById('progress-bar');
+            const pText = document.getElementById('progress-text');
+            const pStatus = document.getElementById('progress-status');
+            const timer = document.getElementById('progress-timer');
+            const controls = document.getElementById('modal-controls');
+            const btnCerrar = document.getElementById('btn-cerrar-alerta');
+            
+            modalBox.classList.remove('border-purple-500', 'shadow-[0_0_40px_rgba(168,85,247,0.4)]');
+            modalBox.classList.add('border-red-600', 'shadow-[0_0_40px_rgba(220,38,38,0.6)]');
+            
+            title.innerText = "ERROR FATAL";
+            title.classList.replace('text-purple-400', 'text-red-500');
+            
+            sub.innerText = "El motor matemático colapsó o se quedó sin memoria.";
+            
+            pBar.classList.replace('from-purple-700', 'from-red-800');
+            pBar.classList.replace('to-purple-400', 'to-red-500');
+            pText.innerText = "Fallo";
+            
+            pStatus.innerText = "[ALERTA CRÍTICA DE RED] Render / Servidor finalizó abruptamente la conexión por Timeout o desbordamiento de memoria.";
+            pStatus.classList.replace('text-purple-300', 'text-red-400');
+            pStatus.classList.remove('animate-pulse');
+            pStatus.classList.add('font-bold', 'text-base', 'mt-4');
+            
+            controls.classList.add('hidden');
+            btnCerrar.classList.remove('hidden');
+            
+            if (timer) timer.classList.add('text-red-500');
+        }
+
+        function restaurarEstilosModal() {
+            const modalBox = document.getElementById('modal-content-box');
+            const title = document.getElementById('modal-title');
+            const sub = document.getElementById('modal-subtitle');
+            const pBar = document.getElementById('progress-bar');
+            const pText = document.getElementById('progress-text');
+            const pStatus = document.getElementById('progress-status');
+            const timer = document.getElementById('progress-timer');
+            const controls = document.getElementById('modal-controls');
+            const btnCerrar = document.getElementById('btn-cerrar-alerta');
+            const eta = document.getElementById('progress-eta');
+
+            modalBox.classList.add('border-purple-500', 'shadow-[0_0_40px_rgba(168,85,247,0.4)]');
+            modalBox.classList.remove('border-red-600', 'shadow-[0_0_40px_rgba(220,38,38,0.6)]');
+            
+            title.innerText = "CALIBRANDO MALLA PENTADIMENSIONAL";
+            title.classList.replace('text-red-500', 'text-purple-400');
+            
+            sub.innerText = "Ajustando Filtro de Kalman (EKF). Por favor, espere...";
+            
+            pBar.classList.add('from-purple-700', 'to-purple-400');
+            pBar.classList.remove('from-red-800', 'to-red-500');
+            pBar.style.width = '0%';
+            pText.innerText = "0%";
+            
+            pStatus.innerText = "Iniciando simulador Monte Carlo...";
+            pStatus.classList.add('text-purple-300', 'animate-pulse');
+            pStatus.classList.remove('text-red-400', 'font-bold', 'text-base', 'mt-4');
+            
+            controls.classList.remove('hidden');
+            btnCerrar.classList.add('hidden');
+            
+            if (timer) timer.classList.remove('text-red-500');
+            
+            // Reset botones
+            const btnParar = document.querySelector('button[onclick="pararYProcesar()"]');
+            if (btnParar) {
+                btnParar.disabled = false;
+                btnParar.innerText = "Parar y Procesar";
+            }
         }
 
         // --- MOTOR CENTRAL ---
         async function submitForm(e, url, consoleId, nextTab) {
             e.preventDefault();
+            
+            initAudio(); // Habilita el audio si es primera interacción del usuario
+
             const form = e.target;
             const data = new FormData(form);
             const display = document.getElementById(consoleId);
@@ -407,38 +554,41 @@
             const progressText = document.getElementById('progress-text');
             const progressStatus = document.getElementById('progress-status');
             const progressTimer = document.getElementById('progress-timer');
+            const progressEta = document.getElementById('progress-eta');
             
             let timerInterval = null;
 
             if (url === '/API/tab3_calibrar') {
+                restaurarEstilosModal();
                 modal.classList.remove('hidden');
-                progressBar.style.width = '0%';
-                progressText.innerText = '0%';
-                progressStatus.innerText = 'Configurando mallas matriciales EKF...';
+                
+                const estimadoSec = calcularETA();
+                const estMins = String(Math.floor(estimadoSec / 60)).padStart(2, '0');
+                const estSecs = String(estimadoSec % 60).padStart(2, '0');
+                if (progressEta) progressEta.innerText = `Tiempo Estimado: ${estMins}:${estSecs}`;
                 
                 if (progressTimer) {
-                    progressTimer.innerText = 'Tiempo transcurrido: 00:00 / Límite: 04:15';
-                    progressTimer.classList.remove('text-red-500'); // Reseteo de color
+                    progressTimer.innerText = 'Cronómetro: 00:00';
                     const startTime = Date.now();
                     timerInterval = setInterval(() => {
                         const elapsed = Math.floor((Date.now() - startTime) / 1000);
                         const mins = String(Math.floor(elapsed / 60)).padStart(2, '0');
                         const secs = String(elapsed % 60).padStart(2, '0');
-                        progressTimer.innerText = `Tiempo transcurrido: ${mins}:${secs} / Límite: 04:15`;
-                        
-                        // Alerta visual de Early Stopping
-                        if (elapsed >= 255) {
-                            progressTimer.classList.add('text-red-500');
-                            progressStatus.innerText = 'Aplicando Early Stopping (Salvando progreso)...';
-                        }
+                        progressTimer.innerText = `Cronómetro: ${mins}:${secs}`;
                     }, 1000);
                 }
             }
 
             let fullOutput = "";
+            abortController = new AbortController();
 
             try {
-                const response = await fetch(url, { method: 'POST', body: data });
+                const response = await fetch(url, { 
+                    method: 'POST', 
+                    body: data,
+                    signal: abortController.signal
+                });
+                
                 if (!response.body) throw new Error("No se recibió respuesta del servidor.");
                 
                 const reader = response.body.getReader();
@@ -451,7 +601,6 @@
                     let text = decoder.decode(value, { stream: true });
                     fullOutput += text;
                     
-                    // --- EXTRACCIÓN AUTOMÁTICA DE ITERACIONES (Pestaña 1 -> Pestaña 3) ---
                     if (url === '/API/tab1_homogenizar') {
                         const iterMatch = text.match(/Iteraciones EKF Sugeridas\s*:\s*(\d+)/);
                         if (iterMatch && iterMatch[1]) {
@@ -460,54 +609,50 @@
                         }
                     }
 
-                    // --- EXTRACCIÓN DE PROGRESO (Modal Pestaña 3) ---
-                    if (url === '/API/tab3_calibrar' && text.includes('Zoom')) {
-                        const zoomMatches = text.match(/Zoom\s+(\d+)\/(\d+)/g);
+                    // Corrección Lógica TCP/IP: Usar fullOutput en vez de text
+                    if (url === '/API/tab3_calibrar') {
+                        const zoomMatches = fullOutput.match(/Zoom\s+(\d+)\/(\d+)/g);
                         if (zoomMatches) {
                             const lastMatch = zoomMatches[zoomMatches.length - 1];
                             const parts = lastMatch.match(/Zoom\s+(\d+)\/(\d+)/);
                             if (parts) {
                                 const current = parseInt(parts[1]);
                                 const total = parseInt(parts[2]);
-                                const pct = Math.min(100, Math.round(((current - 1) / total) * 100) + 15); // Suavizado visual
+                                const pct = Math.min(100, Math.round(((current - 1) / total) * 100) + 15);
                                 progressBar.style.width = pct + '%';
                                 progressText.innerText = pct + '%';
                                 progressStatus.innerText = `Refinando nivel de profundidad ${current} de ${total}...`;
                             }
                         }
-                    }
-
-                    // Cierre del modal VIVO en caso de Error crítico usando fullOutput (Blindaje contra fragmentación de chunks)
-                    if (url === '/API/tab3_calibrar' && fullOutput.includes('[ERROR')) {
-                        modal.classList.add('hidden');
-                        if (timerInterval) clearInterval(timerInterval);
+                        
+                        if (fullOutput.includes('[ERROR')) {
+                            if (timerInterval) clearInterval(timerInterval);
+                            modal.classList.add('hidden');
+                        }
                     }
                     
                     display.textContent = fullOutput;
                     display.scrollTop = display.scrollHeight;
                 }
 
-                // Cierre ROBUSTO Post-Stream: Evita que el modal quede "dangling"
                 if (url === '/API/tab3_calibrar') {
                     if (timerInterval) clearInterval(timerInterval);
-                    if (!fullOutput.includes('[SUCCESS]')) {
-                        modal.classList.add('hidden');
-                    }
-                }
-
-                if (fullOutput.includes('[SUCCESS]')) {
-                    if (url === '/API/tab3_calibrar') {
+                    // Si terminó la lectura TCP/IP pero NO hay success, significa que cortaron o petó
+                    if (!fullOutput.includes('[SUCCESS]') && !fullOutput.includes('[ERROR')) {
+                        lanzarAlertaRoja();
+                    } else if (fullOutput.includes('[SUCCESS]')) {
                         progressBar.style.width = '100%';
                         progressText.innerText = '100%';
                         progressStatus.innerText = '¡Filtros Calibrados Exitosamente!';
                         
-                        // Esperar medio segundo, reproducir beep y ocultar modal
                         setTimeout(() => {
                             modal.classList.add('hidden');
                             playSuccessBeep();
                         }, 600);
                     }
+                }
 
+                if (fullOutput.includes('[SUCCESS]')) {
                     if (nextTab) {
                         document.getElementById('btn-tab' + nextTab).classList.remove('disabled-tab');
                         bloquearFormulario(nextTab - 1);
@@ -521,11 +666,17 @@
                 }
 
             } catch (err) {
-                display.textContent += "\n[ERROR] " + err.message;
-                if (url === '/API/tab3_calibrar') {
-                    modal.classList.add('hidden');
-                    if (timerInterval) clearInterval(timerInterval);
+                if (err.name === 'AbortError') {
+                    // Fue cancelado intencionalmente
+                } else {
+                    display.textContent += "\n[ERROR CRÍTICO] " + err.message;
+                    if (url === '/API/tab3_calibrar') {
+                        if (timerInterval) clearInterval(timerInterval);
+                        lanzarAlertaRoja();
+                    }
                 }
+            } finally {
+                abortController = null;
             }
         }
 
