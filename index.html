@@ -3,6 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>GNSS Engine L1-Sinc DGPS (Caja Negra)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
@@ -24,7 +27,7 @@
 
     <!-- MODAL DE PROGRESO (Caja Negra) -->
     <div id="progress-modal" class="fixed inset-0 bg-black bg-opacity-85 z-50 hidden flex flex-col items-center justify-center fade-in backdrop-blur-sm">
-        <div class="bg-gray-800 p-8 rounded-lg border border-purple-500 shadow-[0_0_40px_rgba(168,85,247,0.4)] w-11/12 max-w-lg text-center" id="modal-content-box">
+        <div id="modal-content-box" class="bg-gray-800 p-8 rounded-lg border border-purple-500 shadow-[0_0_40px_rgba(168,85,247,0.4)] w-11/12 max-w-lg text-center">
             <h2 id="modal-title" class="text-2xl font-bold text-purple-400 mb-2">CALIBRANDO MALLA PENTADIMENSIONAL</h2>
             <p id="modal-subtitle" class="text-gray-400 text-sm mb-6">Ajustando Filtro de Kalman (EKF). Por favor, espere...</p>
             
@@ -37,7 +40,7 @@
             
             <!-- Nuevos Cronómetros y Tiempos Estimados -->
             <div class="mt-4 p-3 bg-gray-900 rounded border border-gray-700">
-                <p id="progress-timer" class="text-white font-mono text-xl font-bold drop-shadow-md transition-colors duration-300">Cronómetro: 00:00</p>
+                <p id="progress-timer" class="text-white font-mono text-xl mt-1 font-bold drop-shadow-md transition-colors duration-300">Cronómetro: 00:00</p>
                 <p id="progress-eta" class="text-green-400 font-mono text-sm mt-1">Tiempo Estimado: Calculando...</p>
             </div>
 
@@ -55,7 +58,7 @@
     <div id="login-container" class="flex items-center justify-center min-h-screen px-4">
         <div class="bg-gray-800 p-8 rounded-lg shadow-2xl border border-gray-700 w-full max-w-md">
             <div class="text-center mb-6">
-                <h2 class="text-2xl font-bold text-green-400">GNSSJP PRO V12</h2>
+                <h2 class="text-2xl font-bold text-green-400">GNSSJP PRO V17</h2>
                 <p class="text-gray-400 text-sm mt-1">Autenticación de Operador Geodésico</p>
             </div>
             <form id="login-form" onsubmit="loginUsuario(event)">
@@ -188,7 +191,7 @@
                     </div>
                 </div>
 
-                <button type="submit" id="btn-submit-tab3" class="w-full bg-purple-600 hover:bg-purple-500 py-3 rounded font-bold transition text-lg mt-2 shadow-lg">Ejecutar Calibración Autónoma (Box Mode)</button>
+                <button type="submit" class="w-full bg-purple-600 hover:bg-purple-500 py-3 rounded font-bold transition text-lg mt-2 shadow-lg">Ejecutar Calibración Autónoma (Box Mode)</button>
             </form>
             <div id="console3" class="console p-4 mt-4 h-64 overflow-y-auto border border-gray-700 rounded"></div>
             <button id="btn-pdf-tab3" onclick="descargarTextoPDF('console3', 'Informe_Calibracion_RMSE')" class="hidden mt-4 bg-red-600 hover:bg-red-500 text-white font-bold py-2 px-4 rounded w-full shadow-lg">Descargar Informe de Calibración PDF</button>
@@ -242,7 +245,7 @@
         let globalAudioCtx = null;
         let abortController = null;
 
-        // INICIALIZACIÓN DE AUDIO POSPUESTA PARA EVITAR BLOQUEO DE AUTOPLAY
+        // --- INICIALIZACIÓN DE AUDIO (PREVENIR BLOQUEO AUTOPLAY) ---
         function initAudio() {
             if (!globalAudioCtx) {
                 const AudioContext = window.AudioContext || window.webkitAudioContext;
@@ -260,7 +263,6 @@
                     const currentData = user.displayName;
                     if (currentData) {
                         const parts = currentData.split("_");
-                        // Validar estrictamente por token, no por tiempo local para evitar desincronización
                         if (parts.length === 2 && parts[1] !== localToken) {
                             stopSessionHeartbeat();
                             alert("SESIÓN FINALIZADA: Se ha iniciado sesión en otro dispositivo. Por seguridad, esta ventana se cerrará.");
@@ -389,6 +391,7 @@
             switchTab(1);
         }
 
+        // --- SISTEMA DE AUDIO (AVISO BEEP) ---
         function playSuccessBeep() {
             try {
                 if (!globalAudioCtx) return;
@@ -399,16 +402,17 @@
                 gain.connect(globalAudioCtx.destination);
                 
                 osc.type = 'sine';
-                osc.frequency.setValueAtTime(880, globalAudioCtx.currentTime);
+                osc.frequency.setValueAtTime(880, globalAudioCtx.currentTime); // Nota A5
                 
                 gain.gain.setValueAtTime(0.1, globalAudioCtx.currentTime);
                 gain.gain.exponentialRampToValueAtTime(0.00001, globalAudioCtx.currentTime + 0.6);
                 
                 osc.start(globalAudioCtx.currentTime);
                 osc.stop(globalAudioCtx.currentTime + 0.6);
-            } catch(e) { console.error(e); }
+            } catch(e) { console.error("Audio bloqueado por navegador", e); }
         }
 
+        // --- FUNCIONES DE CAJA NEGRA Y CONTROLES ---
         function calcularETA() {
             const cons1 = document.getElementById('console1').textContent;
             let epocasBase = 0;
@@ -423,7 +427,6 @@
             const iterField = document.getElementById('param_iter');
             const iteraciones = iterField ? parseInt(iterField.value) : 4;
             
-            // Constante de peso matemático (Asumiendo malla reducida a 60 muestras)
             let estimacionSegundos = Math.max(15, Math.floor((epocasBase + epocasRover) * 0.0005 * iteraciones)); 
             
             return estimacionSegundos;
@@ -444,8 +447,10 @@
         async function pararYProcesar() {
             try {
                 const btn = document.querySelector('button[onclick="pararYProcesar()"]');
-                btn.disabled = true;
-                btn.innerText = "Interrumpiendo...";
+                if (btn) {
+                    btn.disabled = true;
+                    btn.innerText = "Interrumpiendo...";
+                }
                 await fetch('/API/interrumpir', { method: 'POST' });
             } catch(e) { console.error("Error al interrumpir:", e); }
         }
@@ -483,8 +488,8 @@
             pStatus.classList.remove('animate-pulse');
             pStatus.classList.add('font-bold', 'text-base', 'mt-4');
             
-            controls.classList.add('hidden');
-            btnCerrar.classList.remove('hidden');
+            if (controls) controls.classList.add('hidden');
+            if (btnCerrar) btnCerrar.classList.remove('hidden');
             
             if (timer) timer.classList.add('text-red-500');
         }
@@ -499,7 +504,6 @@
             const timer = document.getElementById('progress-timer');
             const controls = document.getElementById('modal-controls');
             const btnCerrar = document.getElementById('btn-cerrar-alerta');
-            const eta = document.getElementById('progress-eta');
 
             modalBox.classList.add('border-purple-500', 'shadow-[0_0_40px_rgba(168,85,247,0.4)]');
             modalBox.classList.remove('border-red-600', 'shadow-[0_0_40px_rgba(220,38,38,0.6)]');
@@ -518,12 +522,11 @@
             pStatus.classList.add('text-purple-300', 'animate-pulse');
             pStatus.classList.remove('text-red-400', 'font-bold', 'text-base', 'mt-4');
             
-            controls.classList.remove('hidden');
-            btnCerrar.classList.add('hidden');
+            if (controls) controls.classList.remove('hidden');
+            if (btnCerrar) btnCerrar.classList.add('hidden');
             
             if (timer) timer.classList.remove('text-red-500');
             
-            // Reset botones
             const btnParar = document.querySelector('button[onclick="pararYProcesar()"]');
             if (btnParar) {
                 btnParar.disabled = false;
@@ -534,12 +537,12 @@
         // --- MOTOR CENTRAL ---
         async function submitForm(e, url, consoleId, nextTab) {
             e.preventDefault();
-            
-            initAudio(); // Habilita el audio si es primera interacción del usuario
-
             const form = e.target;
             const data = new FormData(form);
             const display = document.getElementById(consoleId);
+            
+            initAudio(); 
+            
             display.textContent = "> Iniciando comunicación con el motor GNSSJP...\n";
             
             const pdfButtons = ['btn-pdf-tab1', 'btn-pdf-tab2', 'btn-pdf-tab3', 'btn-pdf-tab4'];
@@ -548,7 +551,6 @@
                 if(btn && consoleId === id.replace('btn-pdf-', 'console')) btn.classList.add('hidden');
             });
 
-            // Lógica UI Modal Pestaña 3
             const modal = document.getElementById('progress-modal');
             const progressBar = document.getElementById('progress-bar');
             const progressText = document.getElementById('progress-text');
@@ -569,6 +571,7 @@
                 
                 if (progressTimer) {
                     progressTimer.innerText = 'Cronómetro: 00:00';
+                    progressTimer.classList.remove('text-red-500');
                     const startTime = Date.now();
                     timerInterval = setInterval(() => {
                         const elapsed = Math.floor((Date.now() - startTime) / 1000);
@@ -602,14 +605,13 @@
                     fullOutput += text;
                     
                     if (url === '/API/tab1_homogenizar') {
-                        const iterMatch = text.match(/Iteraciones EKF Sugeridas\s*:\s*(\d+)/);
+                        const iterMatch = fullOutput.match(/Iteraciones EKF Sugeridas\s*:\s*(\d+)/);
                         if (iterMatch && iterMatch[1]) {
                             const iterField = document.getElementById('param_iter');
                             if (iterField) iterField.value = iterMatch[1];
                         }
                     }
 
-                    // Corrección Lógica TCP/IP: Usar fullOutput en vez de text
                     if (url === '/API/tab3_calibrar') {
                         const zoomMatches = fullOutput.match(/Zoom\s+(\d+)\/(\d+)/g);
                         if (zoomMatches) {
@@ -618,7 +620,7 @@
                             if (parts) {
                                 const current = parseInt(parts[1]);
                                 const total = parseInt(parts[2]);
-                                const pct = Math.min(100, Math.round(((current - 1) / total) * 100) + 15);
+                                const pct = Math.min(100, Math.round(((current - 1) / total) * 100) + 15); 
                                 progressBar.style.width = pct + '%';
                                 progressText.innerText = pct + '%';
                                 progressStatus.innerText = `Refinando nivel de profundidad ${current} de ${total}...`;
@@ -637,7 +639,7 @@
 
                 if (url === '/API/tab3_calibrar') {
                     if (timerInterval) clearInterval(timerInterval);
-                    // Si terminó la lectura TCP/IP pero NO hay success, significa que cortaron o petó
+                    
                     if (!fullOutput.includes('[SUCCESS]') && !fullOutput.includes('[ERROR')) {
                         lanzarAlertaRoja();
                     } else if (fullOutput.includes('[SUCCESS]')) {
@@ -667,9 +669,9 @@
 
             } catch (err) {
                 if (err.name === 'AbortError') {
-                    // Fue cancelado intencionalmente
+                    
                 } else {
-                    display.textContent += "\n[ERROR CRÍTICO] " + err.message;
+                    display.textContent += "\n[ERROR] " + err.message;
                     if (url === '/API/tab3_calibrar') {
                         if (timerInterval) clearInterval(timerInterval);
                         lanzarAlertaRoja();
