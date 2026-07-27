@@ -1656,17 +1656,17 @@ def tab3_calibrar():
                     m_span /= 2.0; cp_span /= 2.0; ca_span /= 2.0
             
             if best_rmse != float('inf'):
-                guardar_estado('opt_mask', best_params['mask'])
-                guardar_estado('opt_cp', best_params['cp'])
-                guardar_estado('opt_ca', best_params['ca'])
-                guardar_estado('opt_max_gap', best_params.get('max_gap', p_max_gap))
-                guardar_estado('opt_snr', best_params.get('snr', p_snr))
-                guardar_estado('opt_eh', best_params['eh'])
-                guardar_estado('opt_ev', best_params['ev'])
+                guardar_estado('opt_mask', float(best_params['mask']))
+                guardar_estado('opt_cp', float(best_params['cp']))
+                guardar_estado('opt_ca', float(best_params['ca']))
+                guardar_estado('opt_max_gap', float(best_params.get('max_gap', p_max_gap)))
+                guardar_estado('opt_snr', float(best_params.get('snr', p_snr)))
+                guardar_estado('opt_eh', float(best_params['eh']))
+                guardar_estado('opt_ev', float(best_params['ev']))
                 
-                guardar_estado('opt_bias_n', best_params['dn'])
-                guardar_estado('opt_bias_e', best_params['de'])
-                guardar_estado('opt_bias_z', best_params['dz'])
+                guardar_estado('opt_bias_n', float(best_params['dn']))
+                guardar_estado('opt_bias_e', float(best_params['de']))
+                guardar_estado('opt_bias_z', float(best_params['dz']))
                 
                 guardar_estado('estrategia_activa', modo_str)
                 
@@ -1713,14 +1713,14 @@ def tab4_procesar():
     h_r = leer_estado('altura_rover')
     modo_hardware = leer_estado('modo_hardware') or 'iguales'
     
-    p_mask = leer_estado('opt_mask')
-    p_cp = leer_estado('opt_cp')
-    p_ca = leer_estado('opt_ca')
-    err_hor_max = leer_estado('opt_eh')
-    err_ver_max = leer_estado('opt_ev')
-    p_max_gap = leer_estado('opt_max_gap')
-    p_snr = leer_estado('opt_snr')
-    estrategia = leer_estado('estrategia_activa')
+    # RECUPERACIÓN ESTRICTA DE PARÁMETROS DINÁMICOS CALCULADOS EN PESTAÑA 3
+    p_mask = safe_f(leer_estado('opt_mask'), 15.0)
+    p_cp = safe_f(leer_estado('opt_cp'), 2.0)
+    p_ca = safe_f(leer_estado('opt_ca'), 0.5)
+    err_hor_max = safe_f(leer_estado('opt_eh'), 0.0)
+    err_ver_max = safe_f(leer_estado('opt_ev'), 0.0)
+    p_max_gap = safe_f(leer_estado('opt_max_gap'), 0.5)
+    estrategia = leer_estado('estrategia_activa') or "MODO_D_DGPS"
 
     url_rover_nuevo = request.form.get('url_rover_nuevo')
     
