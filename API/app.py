@@ -639,7 +639,7 @@ def calcular_posicion_satelite_wgs84(eph, t_emision, tau_vuelo, sys_char='G'):
     return (xs * math.cos(theta) + ys * math.sin(theta), -xs * math.sin(theta) + ys * math.cos(theta), zs, dt_sat)
 
 # =====================================================================
-# ENRUTADOR AUTOMÁTICO (5 REGLAS: A, B, C, D Y SPP)
+# ENRUTADOR AUTOMÁTICO BLINDADO (5 REGLAS ESTRICTAS DE DATOS REALES)
 # =====================================================================
 def analizar_calidad_y_senales_rinex(obs_b, obs_r, max_gap_tolerado=0.05):
     tows_b = sorted(list(obs_b.keys()), key=lambda k: obs_b[k].get('_meta', (0,0,0,0,0,0)))
@@ -684,10 +684,11 @@ def analizar_calidad_y_senales_rinex(obs_b, obs_r, max_gap_tolerado=0.05):
         for s in d_r:
             if s == '_meta' or s not in d_b: continue
             
-            if 'C1' in d_b[s] and 'C1' in d_r[s]: has_C1_epoch = True
-            if 'C5' in d_b[s] and 'C5' in d_r[s]: has_C5_epoch = True
-            if 'L1' in d_b[s] and 'L1' in d_r[s]: has_L1_epoch = True
-            if 'L5' in d_b[s] and 'L5' in d_r[s]: has_L5_epoch = True
+            # VERIFICACIÓN ESTRICTA: La celda de fase debe tener valor numérico real y distinto de cero
+            if 'C1' in d_b[s] and 'C1' in d_r[s] and d_b[s]['C1'] > 0 and d_r[s]['C1'] > 0: has_C1_epoch = True
+            if 'C5' in d_b[s] and 'C5' in d_r[s] and d_b[s]['C5'] > 0 and d_r[s]['C5'] > 0: has_C5_epoch = True
+            if 'L1' in d_b[s] and 'L1' in d_r[s] and d_b[s]['L1'] != 0.0 and d_r[s]['L1'] != 0.0: has_L1_epoch = True
+            if 'L5' in d_b[s] and 'L5' in d_r[s] and d_b[s]['L5'] != 0.0 and d_r[s]['L5'] != 0.0: has_L5_epoch = True
             
         if gap <= max_gap_tolerado:
             if has_L1_epoch: count_L1_sync += 1
@@ -704,16 +705,17 @@ def analizar_calidad_y_senales_rinex(obs_b, obs_r, max_gap_tolerado=0.05):
     pct_C1 = (count_C1_sync / sync_epochs) * 100.0 if sync_epochs > 0 else 0.0
     pct_C5 = (count_C5_sync / sync_epochs) * 100.0 if sync_epochs > 0 else 0.0
     
+    # REGLAS DETERMINISTAS BLINDADAS (UMBRAL 75%)
     if pct_L1 >= 75.0 and pct_L5 >= 75.0:
-        return "MODO_C_PPK", ratio_sync, f"Fase L1+L5 estable ({pct_L1:.1f}% L1, {pct_L5:.1f}% L5). Enrutando a Módulo C (PPK Dual)."
+        return "MODO_C_PPK", ratio_sync, f"Fase L1+L5 real y estable ({pct_L1:.1f}% L1, {pct_L5:.1f}% L5). Enrutando a Módulo C (PPK Dual)."
     elif pct_L1 >= 75.0:
-        return "MODO_A_CODIGO", ratio_sync, f"Fase L1 estable ({pct_L1:.1f}%). Enrutando a Módulo A (PPK Mono)."
+        return "MODO_A_CODIGO", ratio_sync, f"Fase L1 real y estable ({pct_L1:.1f}%). Enrutando a Módulo A (PPK Mono)."
     elif pct_C1 >= 75.0 and pct_C5 >= 75.0:
-        return "MODO_D_DGPS", ratio_sync, f"Fase deficiente ({pct_L1:.1f}% L1). Código C1+C5 estable ({pct_C1:.1f}% C1, {pct_C5:.1f}% C5). Enrutando a Módulo D (DGPS Dual Código)."
+        return "MODO_D_DGPS", ratio_sync, f"Fase deficiente o ausente ({pct_L1:.1f}% L1). Código C1+C5 estable ({pct_C1:.1f}% C1, {pct_C5:.1f}% C5). Enrutando a Módulo D (DGPS Dual Código)."
     elif pct_C1 >= 75.0:
-        return "MODO_D_DGPS", ratio_sync, f"Fase deficiente ({pct_L1:.1f}% L1). Código C1 estable ({pct_C1:.1f}%). Enrutando a Módulo D (DGPS Mono Código)."
+        return "MODO_D_DGPS", ratio_sync, f"Fase deficiente o ausente ({pct_L1:.1f}% L1). Código C1 estable ({pct_C1:.1f}%). Enrutando a Módulo D (DGPS Mono Código)."
     else:
-        return "MODO_B_ASINCRONO", ratio_sync, f"Señales heterogéneas o asincronía grave (C1: {pct_C1:.1f}%, L1: {pct_L1:.1f}%). Enrutando a Módulo B (Rescate IRLS)."
+        return "MODO_B_ASINCRONO", ratio_sync, f"Señales heterogéneas, ausencia de fase o asincronía grave (C1: {pct_C1:.1f}%, L1: {pct_L1:.1f}%). Enrutando a Módulo B (Rescate IRLS)."
 # =====================================================================
 # AISLAMIENTO DE OBSERVABLES (MÓDULOS A, B, C Y D)
 # =====================================================================
