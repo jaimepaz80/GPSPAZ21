@@ -223,7 +223,7 @@ def parse_rinex_obs_completo(path):
                 p = line[1:].split()
                 if len(p) >= 6:
                     y, m, d, h, mn, sec = int(p[0]), int(p[1]), int(p[2]), int(p[3]), int(p[4]), float(p[5])
-                    if y < 100: y += 2000 # [CORRECCIÓN]: Evitar años de 2 dígitos y colapso de TOW
+                    if y < 100: y += 2000 
                     tow = round(gps_time_to_tow(y, m, d, h, mn, sec), 6)
                     obs[tow] = {'_meta': (y, m, d, h, mn, sec)}
             elif tow and len(line) > 3 and line[0] in 'GRECSJ':
@@ -262,7 +262,6 @@ def parse_rinex_obs_completo(path):
     return obs
 
 def interpolar_base_a_rover(obs_base, tr, max_gap=0.05):
-    # [CORRECCIÓN]: Ordenamiento por tiempo absoluto (metadatos) para evitar ruptura en cruces de semana GPS
     tiempos_base = sorted(list(obs_base.keys()), key=lambda k: obs_base[k].get('_meta', (0,0,0,0,0,0)))
     if not tiempos_base: return None
     idx = min(range(len(tiempos_base)), key=lambda i: abs(tiempos_base[i] - tr))
@@ -663,6 +662,7 @@ def analizar_calidad_y_senales_rinex(obs_b, obs_r, max_gap_tolerado=0.05):
     count_L1_sync = 0
     count_L5_sync = 0
     count_C1_sync = 0
+    count_C5_sync = 0
     
     for tr in tows_r:
         if tr < overlap_ini or tr > overlap_fin: continue
@@ -679,11 +679,13 @@ def analizar_calidad_y_senales_rinex(obs_b, obs_r, max_gap_tolerado=0.05):
         has_L1_epoch = False
         has_L5_epoch = False
         has_C1_epoch = False
+        has_C5_epoch = False
         
         for s in d_r:
             if s == '_meta' or s not in d_b: continue
             
             if 'C1' in d_b[s] and 'C1' in d_r[s]: has_C1_epoch = True
+            if 'C5' in d_b[s] and 'C5' in d_r[s]: has_C5_epoch = True
             if 'L1' in d_b[s] and 'L1' in d_r[s]: has_L1_epoch = True
             if 'L5' in d_b[s] and 'L5' in d_r[s]: has_L5_epoch = True
             
@@ -691,23 +693,27 @@ def analizar_calidad_y_senales_rinex(obs_b, obs_r, max_gap_tolerado=0.05):
             if has_L1_epoch: count_L1_sync += 1
             if has_L5_epoch: count_L5_sync += 1
             if has_C1_epoch: count_C1_sync += 1
+            if has_C5_epoch: count_C5_sync += 1
                 
     if total_eval == 0 or sync_epochs == 0: return "MODO_C_SPP", 0.0, "Sin épocas sincronizadas en la ventana de solapamiento."
     
     ratio_sync = sync_epochs / total_eval
     
-    pct_L1 = (count_L1_sync / sync_epochs) * 100.0
-    pct_L5 = (count_L5_sync / sync_epochs) * 100.0
-    pct_C1 = (count_C1_sync / sync_epochs) * 100.0
+    pct_L1 = (count_L1_sync / sync_epochs) * 100.0 if sync_epochs > 0 else 0.0
+    pct_L5 = (count_L5_sync / sync_epochs) * 100.0 if sync_epochs > 0 else 0.0
+    pct_C1 = (count_C1_sync / sync_epochs) * 100.0 if sync_epochs > 0 else 0.0
+    pct_C5 = (count_C5_sync / sync_epochs) * 100.0 if sync_epochs > 0 else 0.0
     
-    if pct_L1 > 75.0 and pct_L5 > 75.0:
+    if pct_L1 >= 75.0 and pct_L5 >= 75.0:
         return "MODO_C_PPK", ratio_sync, f"Fase L1+L5 estable ({pct_L1:.1f}% L1, {pct_L5:.1f}% L5). Enrutando a Módulo C (PPK Dual)."
-    elif pct_L1 > 75.0:
+    elif pct_L1 >= 75.0:
         return "MODO_A_CODIGO", ratio_sync, f"Fase L1 estable ({pct_L1:.1f}%). Enrutando a Módulo A (PPK Mono)."
-    elif pct_C1 > 0.0:
-        return "MODO_D_DGPS", ratio_sync, f"Fase insuficiente o nula ({pct_L1:.1f}% L1). Solo Código C1 ({pct_C1:.1f}%). Degradando a Módulo D (DGPS Estricto)."
+    elif pct_C1 >= 75.0 and pct_C5 >= 75.0:
+        return "MODO_D_DGPS", ratio_sync, f"Fase deficiente ({pct_L1:.1f}% L1). Código C1+C5 estable ({pct_C1:.1f}% C1, {pct_C5:.1f}% C5). Enrutando a Módulo D (DGPS Dual Código)."
+    elif pct_C1 >= 75.0:
+        return "MODO_D_DGPS", ratio_sync, f"Fase deficiente ({pct_L1:.1f}% L1). Código C1 estable ({pct_C1:.1f}%). Enrutando a Módulo D (DGPS Mono Código)."
     else:
-        return "MODO_B_ASINCRONO", ratio_sync, "Señales heterogéneas, corruptas o asincronía grave. Enrutando a Módulo B (Rescate IRLS)."
+        return "MODO_B_ASINCRONO", ratio_sync, f"Señales heterogéneas o asincronía grave (C1: {pct_C1:.1f}%, L1: {pct_L1:.1f}%). Enrutando a Módulo B (Rescate IRLS)."
 # =====================================================================
 # AISLAMIENTO DE OBSERVABLES (MÓDULOS A, B, C Y D)
 # =====================================================================
@@ -900,7 +906,6 @@ def suavizador_rts_backward(forward_states):
         
     return smoothed_states
 
-# MODIFICACIÓN: Inyección de geom_cache para evitar recalcular trigonometría orbital y mareas
 def procesar_ekF_lambda(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_mask, geom_cache=None):
     try:
         tow_b = sd_epoca.get('_tow_b', tr)
@@ -1132,7 +1137,6 @@ def procesar_ekF_lambda(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_mask,
 # =====================================================================
 # VÍA 2 -> MÓDULO B: MOTOR IRLS ASINCRÓNICO CON MAREAS Y SP3+NAV
 # =====================================================================
-# MODIFICACIÓN: Inyección de geom_cache
 def calcular_IRLS_MODO_B(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom_cache=None):
     try:
         tow_b = sd_epoca.get('_tow_b', tr)
@@ -1308,7 +1312,6 @@ def calcular_IRLS_MODO_B(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom
 # =====================================================================
 # VÍA 3 -> MÓDULO C: NUEVO MOTOR PPK L1+L5 (DOBLE FRECUENCIA SIMULTÁNEA)
 # =====================================================================
-# MODIFICACIÓN: Inyección de geom_cache
 def procesar_ekF_PPK_L1_L5(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_mask, geom_cache=None):
     try:
         tow_b = sd_epoca.get('_tow_b', tr)
@@ -1504,7 +1507,6 @@ def procesar_ekF_PPK_L1_L5(sd_epoca, nav, sp3, kf_estado, tr, mask_angle, snr_ma
 # =====================================================================
 # VÍA 4 -> MÓDULO D: NUEVO MOTOR DGPS ESTRICTO CÓDIGO PURO (C1/C5 SIN FASE)
 # =====================================================================
-# MODIFICACIÓN: Inyección de geom_cache
 def calcular_IRLS_MODO_D(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom_cache=None):
     try:
         tow_b = sd_epoca.get('_tow_b', tr)
@@ -1676,7 +1678,6 @@ def calcular_IRLS_MODO_D(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom
         return (X_iter - dx_tide, Y_iter - dy_tide, Z_iter - dz_tide), "FLOAT (DGPS Código Puro)", pdop
     except Exception as e:
         return None, f"FAILED_EXCEPTION:_{str(e)}", None
-
 # =====================================================================
 # ESTADÍSTICAS Y FILTRADO VINCULANTE (HARD FILTER)
 # =====================================================================
@@ -1904,6 +1905,7 @@ def generar_informe_ascii(tipo, p_dict):
 {shift_bloque}========================================================================
 """
     return informe
+
 # =====================================================================
 # RUTAS FLASK (ENRUTADOR AUTÓNOMO Y CUÁDRUPLE VÍA AISLADA)
 # =====================================================================
@@ -1913,7 +1915,6 @@ def index():
     index_path = os.path.join(base_dir, 'index.html')
     return send_file(index_path)
 
-# MODIFICACIÓN: Interrupción Cross-Process usando flag file para aislar variables entre workers
 @app.route('/API/interrumpir', methods=['POST'])
 def interrumpir_proceso():
     with open(os.path.join(UPLOAD_FOLDER, 'interrupt.flag'), 'w') as f:
@@ -1985,7 +1986,6 @@ def tab1_homogenizar():
                 if total_epochs > 0 and c % max(1, total_epochs // 10) == 0: 
                     yield f"[PROGRESO] Cotejando épocas sin distorsión... {int((c / total_epochs) * 100)}%\n"
                 
-                # [CORRECCIÓN]: Límite racional aplicado en lugar de infinito
                 base_interp = interpolar_base_a_rover(base_raw_dict, tr, max_gap=60.0)
                 
                 if base_interp:
@@ -2104,7 +2104,6 @@ def tab2_efemerides():
 def tab3_calibrar():
     start_time = time.time()
     
-    # MODIFICACIÓN: Reset de bandera de interrupción en memoria cruzada
     flag_file = os.path.join(UPLOAD_FOLDER, 'interrupt.flag')
     if os.path.exists(flag_file):
         os.remove(flag_file)
@@ -2122,8 +2121,6 @@ def tab3_calibrar():
 
     p_max_gap = safe_f(request.form.get('param_max_gap'), 0.5)
     p_snr = safe_f(request.form.get('param_snr'), 25.0)
-    
-    # MODIFICACIÓN: Freno estricto backend eliminado para permitir iteraciones dinámicas
     p_iter = max(1, safe_i(request.form.get('param_iter'), 4))
 
     def procesar():
@@ -2161,7 +2158,6 @@ def tab3_calibrar():
             X_b, Y_b, Z_b = geodesicas_a_ecef(lat_b, lon_b, utm_c + h_b)
             X_bg, Y_bg, Z_bg = geodesicas_a_ecef(lat_b, lon_b, utm_c)
 
-            # MODIFICACIÓN: Inicialización de Caché Geométrico para RAM
             geom_cache = {}
 
             # =========================================================
@@ -2245,7 +2241,6 @@ def tab3_calibrar():
                             for snr in set(snr_grid):
                                 if time_out or os.path.exists(flag_file): break
                                 
-                                # MODIFICACIÓN: Time-boxing de 26 segundos
                                 if time.time() - start_time > 26.0:
                                     yield "\n> [ALERTA] Salvavidas Time-Box (26.0s) activado. Abortando iteraciones para evitar Error 504.\n"
                                     time_out = True
@@ -2363,7 +2358,6 @@ def tab3_calibrar():
                     for m in set(m_grid):
                         if time_out or os.path.exists(flag_file): break
                         
-                        # MODIFICACIÓN: Time-boxing de 26 segundos
                         if time.time() - start_time > 26.0:
                             yield "\n> [ALERTA] Salvavidas Time-Box (26.0s) activado. Abortando iteraciones para evitar Error 504.\n"
                             time_out = True
@@ -2676,8 +2670,3 @@ def tab4_procesar():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=6000, debug=True)
-```[span_2](start_span)[span_2](end_span)
-
-Con este bloque, la reestructuración completa de tu aplicación queda terminada. Ambos puntos críticos que causaban el colapso (los falsos positivos de Fase en épocas mutiladas y la restricción a 4 iteraciones) han sido corregidos de raíz. El motor está listo para operar sin limitaciones y degradar de forma segura en caso de trazas insuficientes. 
-
-Si requieres probar el código ensamblado o auditar alguna otra función de tu suite geodésica, avísame.
