@@ -1319,11 +1319,11 @@ def generar_informe_ascii(tipo, p_dict):
     shift_bloque = ""
     if p_dict.get('shift_applied'):
         shift_bloque = f"""
-[4] COMPENSACIÓN DE SITIO EMPÍRICA (SITE CALIBRATION)
+[4] COMPENSACIÓN DE SITIO EMPÍRICA (SITE CALIBRATION VECTORIAL DIRECTA)
 ------------------------------------------------------------------------
-  [-] Sesgo Norte Descontado : {f_14(p_dict.get('bias_n', 0.0))} m
-  [-] Sesgo Este Descontado  : {f_14(p_dict.get('bias_e', 0.0))} m
-  [-] Sesgo Cota Descontado  : {f_14(p_dict.get('bias_z', 0.0))} m
+  [-] Vector Corrección Norte: {f_14(p_dict.get('bias_n', 0.0))} m
+  [-] Vector Corrección Este : {f_14(p_dict.get('bias_e', 0.0))} m
+  [-] Vector Corrección Cota : {f_14(p_dict.get('bias_z', 0.0))} m
 """
 
     informe = f"""
@@ -1721,7 +1721,8 @@ def tab3_calibrar():
                                 if rmse_3d < global_best_score:
                                     global_best_score = rmse_3d
                                     best_rmse = rmse_3d
-                                    best_params = {'mask': float(m), 'cp': float(cp), 'ca': float(ca), 'eh': float(best_eh), 'ev': float(best_ev), 'max_gap': float(p_max_gap), 'snr': float(p_snr), 'rmse': float(rmse_3d), 'ret': int(ret), 'dn': float(nf - utm_n_r), 'de': float(ef - utm_e_r), 'dz': float(zf - utm_c_r)}
+                                    # [CORRECCIÓN GEODÉSICA ESTRICTA]: Almacenamiento vectorial directo de calibración (Real - Calculado)
+                                    best_params = {'mask': float(m), 'cp': float(cp), 'ca': float(ca), 'eh': float(best_eh), 'ev': float(best_ev), 'max_gap': float(p_max_gap), 'snr': float(p_snr), 'rmse': float(rmse_3d), 'ret': int(ret), 'dn': float(utm_n_r - nf), 'de': float(utm_e_r - ef), 'dz': float(utm_c_r - zf)}
                 
                 if nivel_best_rmse != float('inf') and not time_out:
                     yield f"  [*] Fin Iteración {nivel+1} | Mejor RMSE Local: {f_14(nivel_best_params['rmse'])} m\n"
@@ -1886,9 +1887,10 @@ def tab4_procesar():
             bias_e = safe_f(leer_estado('opt_bias_e'), 0.0)
             bias_z = safe_f(leer_estado('opt_bias_z'), 0.0)
             
-            nf_final = float(nf) - float(bias_n)
-            ef_final = float(ef) - float(bias_e)
-            zf_final_ground = float(zf) - float(bias_z) 
+            # [CORRECCIÓN GEODÉSICA ESTRICTA]: Aplicación directa del vector de calibración de sitio (Suma aditiva para corrección vectorial)
+            nf_final = float(nf) + float(bias_n)
+            ef_final = float(ef) + float(bias_e)
+            zf_final_ground = float(zf) + float(bias_z) 
             
             exec_time = time.time() - start_time
             
@@ -1912,7 +1914,7 @@ def tab4_procesar():
                 't_exec': float(exec_time)
             }
             
-            yield "[PROGRESO] Ajuste Vectorial Finalizado con Site Calibration y Alta Velocidad.\n"
+            yield "[PROGRESO] Ajuste Vectorial Finalizado con Site Calibration Directa y Alta Velocidad.\n"
             yield generar_informe_ascii("MEDICION", p_dict)
             yield "\n[SUCCESS]"
         except Exception as e: yield f"\n> [ERROR FATAL] {str(e)}"
