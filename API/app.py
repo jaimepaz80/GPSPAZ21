@@ -539,7 +539,7 @@ def correccion_mareas_solidas(X, Y, Z, tow, year, month, day):
         obliquity = 23.439 - 0.013 * t_jc
         
         xs_sun = dist_sun * math.cos(math.radians(ecl_lon_sun))
-        ys_sun = dist_sun * dist_sun * math.cos(math.radians(obliquity)) * math.sin(math.radians(ecl_lon_sun))
+        ys_sun = dist_sun * math.cos(math.radians(obliquity)) * math.sin(math.radians(ecl_lon_sun))
         zs_sun = dist_sun * math.sin(math.radians(obliquity)) * math.sin(math.radians(ecl_lon_sun))
         
         mean_long_moon = 218.316 + 481267.881 * t_jc
@@ -1423,6 +1423,9 @@ def tab1_homogenizar():
     guardar_estado('altura_rover', h_r)
     guardar_estado('modo_hardware', modo_hardware)
     
+    nom_b_seguro = request.form.get('nombre_base', 'BASE')
+    nom_r_seguro = request.form.get('nombre_rover', 'ROVER')
+    
     if not url_base or not url_rover: 
         return Response("> [ERROR CRÍTICO] Enlaces de Google Drive faltantes.\n", mimetype='text/plain')
     
@@ -1479,9 +1482,7 @@ def tab1_homogenizar():
             c_rover = {'N': utm_n_r, 'E': utm_e_r, 'Z': utm_c_r}
             
             t_exec = time.time() - start_time
-            nom_b = request.form.get('nombre_base', 'BASE')
-            nom_r = request.form.get('nombre_rover', 'ROVER')
-            yield generar_informe_homogeneizacion_detallado(f"{nom_b} ({name_base})", f"{nom_r} ({name_rover})", base_raw_dict, rover_raw_dict, rover_sinc, modo_str, msg, c_base, c_rover, t_exec)
+            yield generar_informe_homogeneizacion_detallado(f"{nom_b_seguro} ({name_base})", f"{nom_r_seguro} ({name_rover})", base_raw_dict, rover_raw_dict, rover_sinc, modo_str, msg, c_base, c_rover, t_exec)
             yield "\n[SUCCESS]"
         except Exception as e: yield f"\n> [ERROR] Falla estructural: {str(e)}"
     return Response(procesar(), mimetype='text/plain')
