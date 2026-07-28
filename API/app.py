@@ -1,4 +1,3 @@
-
 import os
 import math
 import datetime
@@ -1322,18 +1321,19 @@ def generar_informe_ascii(tipo, p_dict):
              INFORME DE PROCESAMIENTO GNSSJP PRO (V18.3)
 ========================================================================
 
-[*] RESULTADO DE MEDICIÓN ABSOLUTA ({estado_sol})
+[*] IDENTIFICACIÓN DE ESTACIONES Y RESULTADO ({estado_sol})
 ------------------------------------------------------------------------
   [-] Fecha y Hora de Cálculo: {fecha_calculo}
+  [-] Punto Base (Pivote)    : {p_dict.get('nombre_base', 'BASE')}
+  [-] Punto Móvil (Medido)   : {p_dict.get('nombre_medido', 'ROVER')}
+  [-] Altura Antena Base     : {f_14(p_dict.get('h_b', 0.0))} m
+  [-] Altura Antena Móvil    : {f_14(p_dict.get('h_r_nuevo', 0.0))} m
   [-] Tiempo de Ejecución    : {f_14(p_dict.get('t_exec', 0.0))} segundos
   [-] Tolerancia Horizontal  : {err_h_str}
   [-] Tolerancia Vertical    : {err_v_str}
   [-] Máscara Elevación      : {f_14(p_dict['mask'])}° (Optimizado libre)
   [-] Filtro Planimétrico    : {f_14(p_dict['cp'])} Sigma
   [-] Filtro Altimétrico     : {f_14(p_dict['ca'])} Sigma
-  [-] Tolerancia Sync (Dinam): {f_14(p_dict.get('max_gap', 2.0))} s
-  [-] Épocas Útiles Retenidas: {p_dict['ret']} ({f_14((p_dict['ret']/float(max(1, p_dict['total'])))*100.0)}% del total)
-  [-] Motor Matemático Activo: {p_dict.get('estrategia', 'Desconocido')}
 
 [1] TRAZABILIDAD DEL PROYECTO Y ARCHIVOS
 ------------------------------------------------------------------------
@@ -1353,12 +1353,12 @@ def generar_informe_ascii(tipo, p_dict):
 
 [3] RESULTADOS VECTORIALES FINALES (DIFERENCIAL PURO)
 ------------------------------------------------------------------------
-  * COORDENADA DE CONTROL (BASE FIJA):
+  * COORDENADA DE CONTROL (BASE FIJA TERRENO):
       Norte : {f_14(p_dict['b_n'])} m
       Este  : {f_14(p_dict['b_e'])} m
       Cota  : {f_14(p_dict['b_z'])} m
 
-  * COORDENADA CALCULADA (AJUSTE {estado_sol}):
+  * COORDENADA CALCULADA (AJUSTE {estado_sol} AL TERRENO):
       Norte : {f_14(p_dict['r_n_calc'])} m
       Este  : {f_14(p_dict['r_e_calc'])} m
       Cota  : {f_14(p_dict['r_z_calc'])} m
@@ -1402,8 +1402,10 @@ def tab1_homogenizar():
     utm_e_r = safe_f(request.form.get('utm_este_r'), 0.0)
     utm_c_r = safe_f(request.form.get('utm_cota_r'), 0.0)
     
-    h_b = 0.0 
-    h_r = 0.0 
+    h_b = safe_f(request.form.get('altura_base'), 0.0) 
+    h_r = safe_f(request.form.get('altura_rover'), 0.0) 
+    nombre_base = request.form.get('nombre_base', 'BASE_DESCONOCIDA')
+    nombre_rover = request.form.get('nombre_rover', 'ROVER_DESCONOCIDO')
     modo_hardware = request.form.get('modo_hardware', 'iguales')
 
     guardar_estado('utm_norte', utm_n)
@@ -1416,6 +1418,8 @@ def tab1_homogenizar():
     guardar_estado('utm_cota_r', utm_c_r)
     guardar_estado('altura_base', h_b)
     guardar_estado('altura_rover', h_r)
+    guardar_estado('nombre_base', nombre_base)
+    guardar_estado('nombre_rover', nombre_rover)
     guardar_estado('modo_hardware', modo_hardware)
     
     if not url_base or not url_rover: 
@@ -1473,8 +1477,10 @@ def tab1_homogenizar():
             c_base = {'N': utm_n, 'E': utm_e, 'Z': utm_c}
             c_rover = {'N': utm_n_r, 'E': utm_e_r, 'Z': utm_c_r}
             
+            id_b = f"{nombre_base} ({name_base})"
+            id_r = f"{nombre_rover} ({name_rover})"
             t_exec = time.time() - start_time
-            yield generar_informe_homogeneizacion_detallado(name_base, name_rover, base_raw_dict, rover_raw_dict, rover_sinc, modo_str, msg, c_base, c_rover, t_exec)
+            yield generar_informe_homogeneizacion_detallado(id_b, id_r, base_raw_dict, rover_raw_dict, rover_sinc, modo_str, msg, c_base, c_rover, t_exec)
             yield "\n[SUCCESS]"
         except Exception as e: yield f"\n> [ERROR] Falla estructural: {str(e)}"
     return Response(procesar(), mimetype='text/plain')
@@ -1578,8 +1584,8 @@ def tab3_calibrar():
     utm_n_r = leer_estado('utm_norte_r')
     utm_e_r = leer_estado('utm_este_r')
     utm_c_r = leer_estado('utm_cota_r')
-    h_b = 0.0
-    h_r = 0.0
+    h_b = safe_f(leer_estado('altura_base'), 0.0)
+    h_r = safe_f(leer_estado('altura_rover'), 0.0)
     modo_hardware = leer_estado('modo_hardware') or 'iguales'
 
     p_max_gap = safe_f(request.form.get('param_max_gap'), 2.0)
@@ -1708,7 +1714,8 @@ def tab3_calibrar():
                             res = estadistica_desacoplada(coords, cp, ca, best_eh, best_ev)
                             if res[0] is None: continue
                             nf, ef, zf, std_n, std_e, std_z, ret, fix_ratio = res
-                            rmse_3d = math.sqrt((nf - utm_n_r)**2 + (ef - utm_e_r)**2 + (zf - utm_c_r)**2)
+                            # Ecuación de calibración corregida a nivel de terreno
+                            rmse_3d = math.sqrt((nf - utm_n_r)**2 + (ef - utm_e_r)**2 + ((zf - h_r) - utm_c_r)**2)
                             
                             if rmse_3d < nivel_best_rmse:
                                 nivel_best_rmse = rmse_3d
@@ -1748,6 +1755,8 @@ def tab3_calibrar():
                 yield "\n========================================================\n"
                 yield f"      [INFORME] PARÁMETROS ÓPTIMOS LIBRES ({modo_str})\n"
                 yield "========================================================\n"
+                yield f"  [-] Punto Base (Pivote): {leer_estado('nombre_base')}\n"
+                yield f"  [-] Punto Rover (Calib): {leer_estado('nombre_rover')}\n"
                 yield f"  [-] Fecha y Hora de Cálculo: {fecha_calculo}\n"
                 yield f"  [-] Tiempo de Ejecución Script: {f_14(t_exec_script)} segundos\n"
                 yield f"  [-] Coord. Base Fija (N,E,Z): {f_14(utm_n)}, {f_14(utm_e)}, {f_14(utm_c)}\n"
@@ -1777,9 +1786,9 @@ def tab4_procesar():
     utm_c = safe_f(leer_estado('utm_cota'), 0.0)
     utm_h = safe_i(leer_estado('utm_huso'), 19)
     utm_hem = leer_estado('utm_hemisferio') or 'N'
-    h_b = 0.0
-    h_r = 0.0
+    h_b = safe_f(leer_estado('altura_base'), 0.0)
     modo_hardware = leer_estado('modo_hardware') or 'iguales'
+    nombre_base = leer_estado('nombre_base') or 'BASE_DESCONOCIDA'
     
     p_mask = safe_f(leer_estado('opt_mask'), 3.5)
     p_cp = safe_f(leer_estado('opt_cp'), 2.0)
@@ -1790,6 +1799,8 @@ def tab4_procesar():
     estrategia = leer_estado('estrategia_activa') or "MODO_D_DGPS"
 
     url_rover_nuevo = request.form.get('url_rover_nuevo')
+    nombre_medido = request.form.get('nombre_medido', 'PUNTO_DESCONOCIDO')
+    h_r_nuevo = safe_f(request.form.get('altura_rover_nuevo'), 0.0)
     
     if p_mask is None or utm_n is None:
         return Response("> [ERROR FATAL] Parámetros o coordenadas no encontrados. Ejecute la Pestaña 3 primero.\n", mimetype='text/plain')
@@ -1881,7 +1892,8 @@ def tab4_procesar():
             
             nf_final = float(nf)
             ef_final = float(ef)
-            zf_final_ground = float(zf)
+            # Descuento del bastón / antena Rover para obtener cota terreno final
+            zf_final_ground = float(zf) - h_r_nuevo
             
             exec_time = time.time() - start_time
             
@@ -1894,6 +1906,10 @@ def tab4_procesar():
                 'ez': float(std_z), 'fix_r': float(fix_ratio), 'pdop': float(global_pdop), 'lambda_ratio': float(global_lambda),
                 'base_file': leer_estado('name_base_raw') or "Drive_Base.obs",
                 'rover_file': rf_nuevo_filename,
+                'nombre_base': str(nombre_base),
+                'nombre_medido': str(nombre_medido),
+                'h_b': float(h_b),
+                'h_r_nuevo': float(h_r_nuevo),
                 'nav_file': leer_estado('name_nav_file') or "auto_nav.nav",
                 'sp3_file': leer_estado('name_sp3_file'),
                 'b_n': float(utm_n), 'b_e': float(utm_e), 'b_z': float(utm_c),
