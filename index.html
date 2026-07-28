@@ -63,6 +63,15 @@
                         <li><strong>Data de Ejemplo (13 de Julio):</strong> <a href="https://drive.google.com/file/d/1Dhh7bPWgjLHo9Xpt4z8UDzyS1u2gqTcA/view?usp=drivesdk" target="_blank" class="text-blue-400 underline">Descargar Data 13-Jul</a></li>
                     </ul>
                 </div>
+
+                <!-- NUEVO CÓDIGO INYECTADO -->
+                <div class="mt-4 mb-6 p-3 bg-gray-900 rounded border border-gray-700 text-center text-xs text-gray-300">
+                    <p>Programador:</p>
+                    <p class="text-green-400 font-bold mt-1">Jaime Ulises Paz López</p>
+                    <p class="text-blue-400 font-mono mt-0.5"><a href="https://wa.me/584121043327" target="_blank" class="hover:underline">WhatsApp: +58 412-1043327</a></p>
+                </div>
+                <!-- FIN DEL NUEVO CÓDIGO -->
+
             </div>
 
             <button type="button" onclick="avanzarDesdeBienvenida()" class="w-full bg-green-600 hover:bg-green-500 py-3 rounded font-bold transition shadow-lg text-lg">Siguiente ➔</button>
@@ -273,7 +282,12 @@
                         <input type="text" name="nombre_medido" required placeholder="Ej. PUNTO_MEDIDO_01" class="w-full bg-gray-700 p-2 rounded border border-blue-500 text-white focus:outline-none mb-3">
 
                         <label class="block text-xs text-blue-300 font-bold">Enlace Drive - RINEX Rover (.obs):</label>
-                        <input type="text" name="url_rover_nuevo" required placeholder="https://drive.google.com/file/d/..." class="w-full bg-gray-700 p-3 rounded border border-blue-500 text-white focus:outline-none focus:border-blue-400 shadow-inner">
+                        <input type="text" name="url_rover_nuevo" required placeholder="https://drive.google.com/file/d/..." class="w-full bg-gray-700 p-3 rounded border border-blue-500 text-white focus:outline-none focus:border-blue-400 shadow-inner mb-3">
+                        
+                        <!-- NUEVO CÓDIGO INYECTADO -->
+                        <label class="block text-xs text-yellow-300 font-bold">Altura Antena Rover Medido (m):</label>
+                        <input type="number" step="any" name="altura_rover_medido" value="0.000" required class="w-full bg-gray-700 p-2 rounded border border-yellow-500 text-white focus:outline-none shadow-inner">
+                        <!-- FIN DEL NUEVO CÓDIGO -->
                     </div>
                 </div>
 
