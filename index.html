@@ -312,14 +312,21 @@
         let globalAudioCtx = null;
         let abortController = null;
 
-        // --- CONTROL DE PANTALLA DE BIENVENIDA Y ESTADO ---
-        let bienvenidaAceptada = false;
+        // --- MÁQUINA DE ESTADO ESTRICTA PARA UI ---
+        const uiState = { bienvenidaActiva: true };
+
+        // Blindaje absoluto contra ejecuciones asíncronas de Firebase y caché del navegador
+        window.onload = () => {
+            document.getElementById('welcome-screen').classList.remove('hidden');
+            document.getElementById('login-container').classList.add('hidden');
+            document.getElementById('app-container').classList.add('hidden');
+        };
 
         function avanzarDesdeBienvenida() {
-            bienvenidaAceptada = true;
+            // Único disparador permitido para alterar la visualización inicial
+            uiState.bienvenidaActiva = false;
             document.getElementById('welcome-screen').classList.add('hidden');
             
-            // Evaluamos si Firebase ya validó la sesión en segundo plano
             if (auth.currentUser) {
                 document.getElementById('login-container').classList.add('hidden');
                 document.getElementById('app-container').classList.remove('hidden');
@@ -366,6 +373,7 @@
             if (heartbeatTimer) clearInterval(heartbeatTimer);
         }
 
+        // --- OBSERVADOR DE ESTADO FIREBASE DESACOPLADO ---
         auth.onAuthStateChanged(async (user) => {
             const loginContainer = document.getElementById('login-container');
             const appContainer = document.getElementById('app-container');
@@ -379,9 +387,7 @@
                     const parts = currentData.split("_");
                     if (parts.length === 2) {
                         const activeToken = parts[1];
-                        if (activeToken !== localToken) {
-                            isLockedOut = true;
-                        }
+                        if (activeToken !== localToken) { isLockedOut = true; }
                     }
                 }
 
@@ -394,17 +400,20 @@
 
                 startSessionHeartbeat(user);
                 errorDiv.innerText = "";
-                document.getElementById('login-form').reset();
                 
-                // Solo alterar UI si el usuario ya pasó la pantalla de bienvenida
-                if (bienvenidaAceptada) {
+                const loginForm = document.getElementById('login-form');
+                if(loginForm) loginForm.reset();
+                
+                // REGLA: Firebase no toca la UI si la bienvenida sigue activa
+                if (!uiState.bienvenidaActiva) {
                     loginContainer.classList.add('hidden');
                     appContainer.classList.remove('hidden');
                 }
             } else {
                 stopSessionHeartbeat();
-                // Solo alterar UI si el usuario ya pasó la pantalla de bienvenida
-                if (bienvenidaAceptada) {
+                
+                // REGLA: Firebase no toca la UI si la bienvenida sigue activa
+                if (!uiState.bienvenidaActiva) {
                     appContainer.classList.add('hidden');
                     loginContainer.classList.remove('hidden');
                 }
