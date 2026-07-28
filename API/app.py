@@ -1315,16 +1315,6 @@ def generar_informe_ascii(tipo, p_dict):
     
     fecha_calculo = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     dist_baseline = math.sqrt((p_dict['b_n'] - p_dict['r_n_calc'])**2 + (p_dict['b_e'] - p_dict['r_e_calc'])**2 + (p_dict['b_z'] - p_dict['r_z_calc'])**2)
-    
-    shift_bloque = ""
-    if p_dict.get('shift_applied'):
-        shift_bloque = f"""
-[4] COMPENSACIÓN DE SITIO EMPÍRICA (SITE CALIBRATION VECTORIAL PURA)
-------------------------------------------------------------------------
-  [-] Vector Corrección Norte: {f_14(p_dict.get('bias_n', 0.0))} m
-  [-] Vector Corrección Este : {f_14(p_dict.get('bias_e', 0.0))} m
-  [-] Vector Corrección Cota : {f_14(p_dict.get('bias_z', 0.0))} m
-"""
 
     informe = f"""
 ========================================================================
@@ -1360,7 +1350,7 @@ def generar_informe_ascii(tipo, p_dict):
   [-] Error Horizontal (RMS) : ± {f_14(math.hypot(p_dict['std_n'], p_dict['std_e']))} m
   [-] Error Espacial (3D RMS): ± {f_14(math.sqrt(p_dict['std_n']**2 + p_dict['std_e']**2 + p_dict['std_z']**2))} m
 
-[3] RESULTADOS VECTORIALES FINALES
+[3] RESULTADOS VECTORIALES FINALES (DIFERENCIAL PURO)
 ------------------------------------------------------------------------
   * COORDENADA DE CONTROL (BASE FIJA):
       Norte : {f_14(p_dict['b_n'])} m
@@ -1371,7 +1361,7 @@ def generar_informe_ascii(tipo, p_dict):
       Norte : {f_14(p_dict['r_n_calc'])} m
       Este  : {f_14(p_dict['r_e_calc'])} m
       Cota  : {f_14(p_dict['r_z_calc'])} m
-{shift_bloque}========================================================================
+========================================================================
 """
     return informe
 
@@ -1721,8 +1711,7 @@ def tab3_calibrar():
                                 if rmse_3d < global_best_score:
                                     global_best_score = rmse_3d
                                     best_rmse = rmse_3d
-                                    # [CORRECCIÓN GEODÉSICA ORTOMÉTRICA DIRECTA]: Diferencia correcta (Real - Calculado) para sumar algebraicamente al geoide local
-                                    best_params = {'mask': float(m), 'cp': float(cp), 'ca': float(ca), 'eh': float(best_eh), 'ev': float(best_ev), 'max_gap': float(p_max_gap), 'snr': float(p_snr), 'rmse': float(rmse_3d), 'ret': int(ret), 'dn': float(utm_n_r - nf), 'de': float(utm_e_r - ef), 'dz': float(utm_c_r - zf)}
+                                    best_params = {'mask': float(m), 'cp': float(cp), 'ca': float(ca), 'eh': float(best_eh), 'ev': float(best_ev), 'max_gap': float(p_max_gap), 'snr': float(p_snr), 'rmse': float(rmse_3d), 'ret': int(ret)}
                 
                 if nivel_best_rmse != float('inf') and not time_out:
                     yield f"  [*] Fin Iteración {nivel+1} | Mejor RMSE Local: {f_14(nivel_best_params['rmse'])} m\n"
@@ -1742,10 +1731,6 @@ def tab3_calibrar():
                 guardar_estado('opt_snr', float(best_params.get('snr', p_snr)))
                 guardar_estado('opt_eh', float(best_params['eh']))
                 guardar_estado('opt_ev', float(best_params['ev']))
-                
-                guardar_estado('opt_bias_n', float(best_params['dn']))
-                guardar_estado('opt_bias_e', float(best_params['de']))
-                guardar_estado('opt_bias_z', float(best_params['dz']))
                 
                 guardar_estado('estrategia_activa', modo_str)
                 
@@ -1883,14 +1868,10 @@ def tab4_procesar():
                 
             nf, ef, zf, std_n, std_e, std_z, ret, fix_ratio = res_estadistica
             
-            bias_n = safe_f(leer_estado('opt_bias_n'), 0.0)
-            bias_e = safe_f(leer_estado('opt_bias_e'), 0.0)
-            bias_z = safe_f(leer_estado('opt_bias_z'), 0.0)
-            
-            # [CORRECCIÓN GEODÉSICA ORTOMÉTRICA PURA]: Aplicación estricta y limpia del vector de calibración altimétrica (Suma algebraica natural entre cota calculada y sesgo del punto de control)
-            nf_final = float(nf) + float(bias_n)
-            ef_final = float(ef) + float(bias_e)
-            zf_final_ground = float(zf) + float(bias_z) 
+            # [CÁLCULO GEODÉSICO PURO SIN CALIBRACIÓN EMPÍRICA / SIN DATOS FORZADOS]
+            nf_final = float(nf)
+            ef_final = float(ef)
+            zf_final_ground = float(zf)
             
             exec_time = time.time() - start_time
             
@@ -1909,12 +1890,11 @@ def tab4_procesar():
                 'r_n_calc': float(nf_final), 'r_e_calc': float(ef_final), 'r_z_calc': float(zf_final_ground),
                 'utm_h': int(utm_h), 'utm_hem': str(utm_hem),
                 'estrategia': str(estrategia),
-                'shift_applied': True,
-                'bias_n': float(bias_n), 'bias_e': float(bias_e), 'bias_z': float(bias_z),
+                'shift_applied': False,
                 't_exec': float(exec_time)
             }
             
-            yield "[PROGRESO] Ajuste Vectorial Finalizado con Calibración Ortométrica Pura.\n"
+            yield "[PROGRESO] Procesamiento Geodésico Diferencial Puro Finalizado.\n"
             yield generar_informe_ascii("MEDICION", p_dict)
             yield "\n[SUCCESS]"
         except Exception as e: yield f"\n> [ERROR FATAL] {str(e)}"
