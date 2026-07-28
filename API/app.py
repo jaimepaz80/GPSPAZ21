@@ -539,7 +539,7 @@ def correccion_mareas_solidas(X, Y, Z, tow, year, month, day):
         obliquity = 23.439 - 0.013 * t_jc
         
         xs_sun = dist_sun * math.cos(math.radians(ecl_lon_sun))
-        ys_sun = dist_sun * math.cos(math.radians(obliquity)) * math.sin(math.radians(ecl_lon_sun))
+        ys_sun = dist_sun * dist_sun * math.cos(math.radians(obliquity)) * math.sin(math.radians(ecl_lon_sun))
         zs_sun = dist_sun * math.sin(math.radians(obliquity)) * math.sin(math.radians(ecl_lon_sun))
         
         mean_long_moon = 218.316 + 481267.881 * t_jc
@@ -1336,6 +1336,9 @@ def generar_informe_ascii(tipo, p_dict):
 
 [1] TRAZABILIDAD DEL PROYECTO Y ARCHIVOS
 ------------------------------------------------------------------------
+  [-] ID Base (Control)      : {p_dict.get('nombre_base', 'BASE')}
+  [-] ID Rover (Calibración) : {p_dict.get('nombre_rover', 'ROVER')}
+  [-] ID Punto Medido        : {p_dict.get('nombre_medido', 'PUNTO_MEDIDO')}
   [-] Archivo Control (Base) : {p_dict['base_file']}
   [-] Archivo Móvil (Rover)  : {p_dict['rover_file']}
   [-] Archivo Efemérides NAV : {nav_str} (Ionósfera Klobuchar)
@@ -1401,9 +1404,12 @@ def tab1_homogenizar():
     utm_e_r = safe_f(request.form.get('utm_este_r'), 0.0)
     utm_c_r = safe_f(request.form.get('utm_cota_r'), 0.0)
     
-    h_b = 0.0 
-    h_r = 0.0 
+    h_b = safe_f(request.form.get('altura_base'), 0.0)
+    h_r = safe_f(request.form.get('altura_rover'), 0.0)
     modo_hardware = request.form.get('modo_hardware', 'iguales')
+    
+    guardar_estado('nombre_base', request.form.get('nombre_base', 'BASE'))
+    guardar_estado('nombre_rover', request.form.get('nombre_rover', 'ROVER'))
 
     guardar_estado('utm_norte', utm_n)
     guardar_estado('utm_este', utm_e)
@@ -1473,7 +1479,9 @@ def tab1_homogenizar():
             c_rover = {'N': utm_n_r, 'E': utm_e_r, 'Z': utm_c_r}
             
             t_exec = time.time() - start_time
-            yield generar_informe_homogeneizacion_detallado(name_base, name_rover, base_raw_dict, rover_raw_dict, rover_sinc, modo_str, msg, c_base, c_rover, t_exec)
+            nom_b = request.form.get('nombre_base', 'BASE')
+            nom_r = request.form.get('nombre_rover', 'ROVER')
+            yield generar_informe_homogeneizacion_detallado(f"{nom_b} ({name_base})", f"{nom_r} ({name_rover})", base_raw_dict, rover_raw_dict, rover_sinc, modo_str, msg, c_base, c_rover, t_exec)
             yield "\n[SUCCESS]"
         except Exception as e: yield f"\n> [ERROR] Falla estructural: {str(e)}"
     return Response(procesar(), mimetype='text/plain')
@@ -1577,8 +1585,8 @@ def tab3_calibrar():
     utm_n_r = leer_estado('utm_norte_r')
     utm_e_r = leer_estado('utm_este_r')
     utm_c_r = leer_estado('utm_cota_r')
-    h_b = 0.0
-    h_r = 0.0
+    h_b = safe_f(leer_estado('altura_base'), 0.0)
+    h_r = safe_f(leer_estado('altura_rover'), 0.0)
     modo_hardware = leer_estado('modo_hardware') or 'iguales'
 
     p_max_gap = safe_f(request.form.get('param_max_gap'), 2.0)
@@ -1776,8 +1784,9 @@ def tab4_procesar():
     utm_c = safe_f(leer_estado('utm_cota'), 0.0)
     utm_h = safe_i(leer_estado('utm_huso'), 19)
     utm_hem = leer_estado('utm_hemisferio') or 'N'
-    h_b = 0.0
-    h_r = 0.0
+    h_b = safe_f(leer_estado('altura_base'), 0.0)
+    h_r_medido = safe_f(request.form.get('altura_rover_medido'), 0.0)
+    nombre_medido = request.form.get('nombre_medido', 'PUNTO_MEDIDO')
     modo_hardware = leer_estado('modo_hardware') or 'iguales'
     
     p_mask = safe_f(leer_estado('opt_mask'), 3.5)
@@ -1880,7 +1889,7 @@ def tab4_procesar():
             
             nf_final = float(nf)
             ef_final = float(ef)
-            zf_final_ground = float(zf)
+            zf_final_ground = float(zf) - h_r_medido
             
             exec_time = time.time() - start_time
             
@@ -1891,6 +1900,9 @@ def tab4_procesar():
                 'nf': float(nf_final), 'ef': float(ef_final), 'zf': float(zf_final_ground), 
                 'ret': int(ret), 'total': len(coords), 'std_n': float(std_n), 'std_e': float(std_e), 'std_z': float(std_z),
                 'ez': float(std_z), 'fix_r': float(fix_ratio), 'pdop': float(global_pdop), 'lambda_ratio': float(global_lambda),
+                'nombre_base': leer_estado('nombre_base') or 'BASE',
+                'nombre_rover': leer_estado('nombre_rover') or 'ROVER',
+                'nombre_medido': nombre_medido,
                 'base_file': leer_estado('name_base_raw') or "Drive_Base.obs",
                 'rover_file': rf_nuevo_filename,
                 'nav_file': leer_estado('name_nav_file') or "auto_nav.nav",
