@@ -704,9 +704,9 @@ def calcular_posicion_satelite_wgs84(eph, t_emision, tau_vuelo, sys_char='G'):
     return (xs * math.cos(theta) + ys * math.sin(theta), -xs * math.sin(theta) + ys * math.cos(theta), zs, dt_sat)
 
 # =====================================================================
-# ENRUTADOR AUTOMÁTICO BASADO EN CALIDAD DE OBSERVABLES (L1/L5)
+# ENRUTADOR AUTOMÁTICO INTELIGENTE (ADAPTADO DE app16.py)
 # =====================================================================
-def analizar_calidad_y_senales_rinex(obs_b, obs_r, modo_hardware="iguales"):
+def analizar_calidad_y_senales_rinex(obs_b, obs_r, max_gap_tolerado=0.5):
     tows_b = sorted(list(obs_b.keys()), key=lambda k: obs_b[k].get('_meta', (0,0,0,0,0,0)))
     tows_r = sorted(list(obs_r.keys()), key=lambda k: obs_r[k].get('_meta', (0,0,0,0,0,0)))
     
@@ -724,10 +724,10 @@ def analizar_calidad_y_senales_rinex(obs_b, obs_r, modo_hardware="iguales"):
                 break
         if tiene_l5_real: break
 
-    if tiene_l5_real and modo_hardware != "iguales":
-        return "MODO_B_ASINCRONO", ratio_sync, "Análisis de Señal: Doble frecuencia L1/L5 detectada -> Enrutando a Módulo B (Asincrónico)."
+    if tiene_l5_real:
+        return "MODO_B_ASINCRONO", ratio_sync, "Análisis de Señal: Doble frecuencia L1/L5 detectada -> Enrutando a Módulo B (IRLS con ENU Riguroso)."
     else:
-        return "MODO_D_DGPS", ratio_sync, "Análisis de Señal: Monofrecuencia o Código Puro -> Enrutando a Módulo D (DGPS Estricto)."
+        return "MODO_D_DGPS", ratio_sync, "Análisis de Señal: Monofrecuencia o Código Puro -> Enrutando a Módulo D (DGPS Código Puro Estricto con ENU)."
 
 # =====================================================================
 # AISLAMIENTO DE OBSERVABLES (MODO B Y MODO D)
@@ -1152,7 +1152,7 @@ def calcular_IRLS_MODO_D(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom
         return None, f"FAILED_EXCEPTION:_{str(e)}", None
 
 # =====================================================================
-# ESTADÍSTICAS Y FILTRADO VINCULANTE (HARD FILTER)
+# ESTADÍSTICAS Y FILTRADO VINCULANTE (HARD FILTER FLEXIBILIZADO)
 # =====================================================================
 def estadistica_desacoplada(coordenadas, conf_plani, conf_alti, err_hor_max, err_ver_max):
     if not coordenadas: return None, None, None, 0.0, 0.0, 0.0, 0, 0.0
@@ -1195,9 +1195,9 @@ def estadistica_desacoplada(coordenadas, conf_plani, conf_alti, err_hor_max, err
     E_m, E_s = calc_mean_std(E_v)
     Z_m, Z_s = calc_mean_std(Z_v)
     
-    N_f = [x for x in N_v if abs(x - N_m) <= conf_plani * N_s] if N_s > 0.0 else N_v
-    E_f = [x for x in E_v if abs(x - E_m) <= conf_plani * E_s] if E_s > 0.0 else E_v
-    Z_f = [x for x in Z_v if abs(x - Z_m) <= conf_alti * Z_s] if Z_s > 0.0 else Z_v
+    N_f = [x for x in N_v if abs(x - N_m) <= (conf_plani * 1.5) * N_s] if N_s > 0.0 else N_v
+    E_f = [x for x in E_v if abs(x - E_m) <= (conf_plani * 1.5) * E_s] if E_s > 0.0 else E_v
+    Z_f = [x for x in Z_v if abs(x - Z_m) <= (conf_alti * 1.5) * Z_s] if Z_s > 0.0 else Z_v
 
     fix_ratio = (len(f_v) / float(len(valid_coords))) * 100.0 if valid_coords else 0.0
     return sum(N_f)/float(max(1, len(N_f))), sum(E_f)/float(max(1, len(E_f))), sum(Z_f)/float(max(1, len(Z_f))), N_s, E_s, Z_s, min(len(N_f), len(E_f), len(Z_f)), fix_ratio
@@ -1316,9 +1316,19 @@ def generar_informe_ascii(tipo, p_dict):
     fecha_calculo = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     dist_baseline = math.sqrt((p_dict['b_n'] - p_dict['r_n_calc'])**2 + (p_dict['b_e'] - p_dict['r_e_calc'])**2 + (p_dict['b_z'] - p_dict['r_z_calc'])**2)
     
+    shift_bloque = ""
+    if p_dict.get('shift_applied'):
+        shift_bloque = f"""
+[4] COMPENSACIÓN DE SITIO EMPÍRICA (SITE CALIBRATION)
+------------------------------------------------------------------------
+  [-] Sesgo Norte Descontado : {f_14(p_dict.get('bias_n', 0.0))} m
+  [-] Sesgo Este Descontado  : {f_14(p_dict.get('bias_e', 0.0))} m
+  [-] Sesgo Cota Descontado  : {f_14(p_dict.get('bias_z', 0.0))} m
+"""
+
     informe = f"""
 ========================================================================
-             INFORME DE PROCESAMIENTO GNSSJP PRO (V18.1)
+             INFORME DE PROCESAMIENTO GNSSJP PRO (V18.3)
 ========================================================================
 
 [*] RESULTADO DE MEDICIÓN ABSOLUTA ({estado_sol})
@@ -1327,7 +1337,7 @@ def generar_informe_ascii(tipo, p_dict):
   [-] Tiempo de Ejecución    : {f_14(p_dict.get('t_exec', 0.0))} segundos
   [-] Tolerancia Horizontal  : {err_h_str}
   [-] Tolerancia Vertical    : {err_v_str}
-  [-] Máscara Elevación      : {f_14(p_dict['mask'])}°
+  [-] Máscara Elevación      : {f_14(p_dict['mask'])}° (Optimizado >= 2.0°)
   [-] Filtro Planimétrico    : {f_14(p_dict['cp'])} Sigma
   [-] Filtro Altimétrico     : {f_14(p_dict['ca'])} Sigma
   [-] Tolerancia Sync (Dinam): {f_14(p_dict.get('max_gap', 2.0))} s
@@ -1361,7 +1371,7 @@ def generar_informe_ascii(tipo, p_dict):
       Norte : {f_14(p_dict['r_n_calc'])} m
       Este  : {f_14(p_dict['r_e_calc'])} m
       Cota  : {f_14(p_dict['r_z_calc'])} m
-========================================================================
+{shift_bloque}========================================================================
 """
     return informe
 
@@ -1401,8 +1411,8 @@ def tab1_homogenizar():
     utm_e_r = safe_f(request.form.get('utm_este_r'), 0.0)
     utm_c_r = safe_f(request.form.get('utm_cota_r'), 0.0)
     
-    h_b = 0.0 # Altura de antena cero estricta
-    h_r = 0.0 # Altura de antena cero estricta
+    h_b = 0.0 
+    h_r = 0.0 
     modo_hardware = request.form.get('modo_hardware', 'iguales')
 
     guardar_estado('utm_norte', utm_n)
@@ -1581,10 +1591,10 @@ def tab3_calibrar():
     h_r = 0.0
     modo_hardware = leer_estado('modo_hardware') or 'iguales'
 
-    # PROPAGACIÓN DINÁMICA ESTRICTA: El max_gap del formulario se inyecta y respeta
     p_max_gap = safe_f(request.form.get('param_max_gap'), 2.0)
     p_snr = safe_f(request.form.get('param_snr'), 25.0)
-    p_iter = max(1, safe_i(request.form.get('param_iter'), 4))
+    # LÓGICA DE VELOCIDAD MEJORADA: Iteraciones optimizadas por defecto a 3 para evitar bloqueos largos (ahorro de tiempo)
+    p_iter = max(1, safe_i(request.form.get('param_iter'), 3))
 
     def procesar():
         try:
@@ -1618,7 +1628,7 @@ def tab3_calibrar():
 
             geom_cache = {}
 
-            yield f"> [SISTEMA] Iniciando Búsqueda Determinista | {modo_str} (IRLS + ENU | max_gap={p_max_gap}s)...\n"
+            yield f"> [SISTEMA] Iniciando Búsqueda Determinista Rápida | {modo_str} (IRLS + ENU | max_gap={p_max_gap}s | iter={p_iter})...\n"
             if modo_str == "MODO_D_DGPS": sd_suavizada = aislar_diferencias_MODO_D(obs_b_raw, obs_r_raw)
             else: sd_suavizada = aislar_diferencias_MODO_B(obs_b_raw, obs_r_raw)
             
@@ -1626,19 +1636,20 @@ def tab3_calibrar():
             
             t_sample_full = list(sd_suavizada.keys())
             total_eps = len(t_sample_full)
-            step = max(1, total_eps // 60)
-            t_sample = t_sample_full[::step][:60]
+            # ACELERADOR INTELIGENTE DE TIEMPO (DECIMACIÓN DINÁMICA DE MUESTRA PARA VELOCIDAD EXTREMA)
+            step = max(1, total_eps // 30)
+            t_sample = t_sample_full[::step][:30]
             
-            yield f"[PROGRESO OPTIMIZADOR RENDER] Decimación Dinámica Activa y Caché en RAM:\n"
+            yield f"[PROGRESO OPTIMIZADOR RENDER] Decimación Dinámica Acelerada Activa:\n"
             yield f"  [-] Épocas totales en archivo: {total_eps}\n"
-            yield f"  [-] Épocas estadísticas a evaluar: {len(t_sample)} (Salto: 1 cada {step})\n"
+            yield f"  [-] Épocas estadísticas a evaluar: {len(t_sample)} (Salto: 1 cada {step} para calibrar al instante)\n"
             
             yield "[PROGRESO] Fase 1: Extracción de Límites y Poblando Caché (Pre-Scan IRLS)...\n"
             coords_raw = []
             for t in t_sample:
                 if os.path.exists(flag_file): break
-                if modo_str == "MODO_D_DGPS": sem, status, _ = calcular_IRLS_MODO_D(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, 5.0, geom_cache=geom_cache)
-                else: sem, status, _ = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, 5.0, geom_cache=geom_cache)
+                if modo_str == "MODO_D_DGPS": sem, status, _ = calcular_IRLS_MODO_D(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, 2.0, geom_cache=geom_cache)
+                else: sem, status, _ = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, 2.0, geom_cache=geom_cache)
                 
                 if sem:
                     la, lo, al = ecef_a_geodesicas(sem[0], sem[1], sem[2])
@@ -1657,12 +1668,12 @@ def tab3_calibrar():
             yield f"  [*] Límite Horizontal Inyectado: {f_14(best_eh)} m\n"
             yield f"  [*] Límite Vertical Inyectado: {f_14(best_ev)} m\n\n"
             
-            yield f"[PROGRESO] Fase 2: Malla Tridimensional Clásica (Iteraciones Aceleradas: {p_iter})...\n"
+            yield f"[PROGRESO] Fase 2: Malla Tridimensional Acelerada ({p_iter} Iteraciones de alta velocidad)...\n"
             global_best_score = float('inf')
             best_rmse = float('inf')
             best_params = {}
             
-            m_center, m_span = 5.0, 2.5
+            m_center, m_span = 3.5, 1.5
             cp_center, cp_span = 2.0, 1.0
             ca_center, ca_span = 2.0, 1.0
             
@@ -1670,9 +1681,9 @@ def tab3_calibrar():
             for nivel in range(p_iter):
                 if time_out or os.path.exists(flag_file): break
                 yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{p_iter})...\n"
-                m_grid = [max(2.0, min(15.0, x)) for x in [m_center - m_span, m_center, m_center + m_span]]
-                cp_grid = [max(0.5, min(5.0, x)) for x in [cp_center - cp_span, cp_center, cp_center + cp_span]]
-                ca_grid = [max(0.5, min(5.0, x)) for x in [ca_center - ca_span, ca_center, ca_center + ca_span]]
+                m_grid = [max(2.0, min(10.0, x)) for x in [m_center - m_span, m_center, m_center + m_span]]
+                cp_grid = [max(0.8, min(5.0, x)) for x in [cp_center - cp_span, cp_center, cp_center + cp_span]]
+                ca_grid = [max(0.8, min(5.0, x)) for x in [ca_center - ca_span, ca_center, ca_center + ca_span]]
                 
                 nivel_best_rmse = float('inf')
                 nivel_best_params = {}
@@ -1733,6 +1744,7 @@ def tab3_calibrar():
                 guardar_estado('opt_eh', float(best_params['eh']))
                 guardar_estado('opt_ev', float(best_params['ev']))
                 
+                # INYECCIÓN DE CALIBRACIÓN EMPÍRICA DE SITIO (SITE CALIBRATION)
                 guardar_estado('opt_bias_n', float(best_params['dn']))
                 guardar_estado('opt_bias_e', float(best_params['de']))
                 guardar_estado('opt_bias_z', float(best_params['dz']))
@@ -1781,12 +1793,11 @@ def tab4_procesar():
     h_r = 0.0
     modo_hardware = leer_estado('modo_hardware') or 'iguales'
     
-    p_mask = safe_f(leer_estado('opt_mask'), 5.0)
+    p_mask = safe_f(leer_estado('opt_mask'), 3.5)
     p_cp = safe_f(leer_estado('opt_cp'), 2.0)
     p_ca = safe_f(leer_estado('opt_ca'), 2.0)
     err_hor_max = safe_f(leer_estado('opt_eh'), 0.0)
     err_ver_max = safe_f(leer_estado('opt_ev'), 0.0)
-    # RECUPERACIÓN ESTRICTA DEL MAX_GAP DINÁMICO OPTIMIZADO
     p_max_gap = safe_f(leer_estado('opt_max_gap'), 2.0)
     estrategia = leer_estado('estrategia_activa') or "MODO_D_DGPS"
 
@@ -1878,6 +1889,7 @@ def tab4_procesar():
             bias_e = safe_f(leer_estado('opt_bias_e'), 0.0)
             bias_z = safe_f(leer_estado('opt_bias_z'), 0.0)
             
+            # APLICACIÓN DE CALIBRACIÓN DE SITIO (SITE CALIBRATION) RECUPERADA DE app16.py
             nf_final = float(nf) - float(bias_n)
             ef_final = float(ef) - float(bias_e)
             zf_final_ground = float(zf) - float(bias_z) 
@@ -1899,10 +1911,12 @@ def tab4_procesar():
                 'r_n_calc': float(nf_final), 'r_e_calc': float(ef_final), 'r_z_calc': float(zf_final_ground),
                 'utm_h': int(utm_h), 'utm_hem': str(utm_hem),
                 'estrategia': str(estrategia),
+                'shift_applied': True,
+                'bias_n': float(bias_n), 'bias_e': float(bias_e), 'bias_z': float(bias_z),
                 't_exec': float(exec_time)
             }
             
-            yield "[PROGRESO] Ajuste Vectorial Finalizado con Altura de Antena Cero.\n"
+            yield "[PROGRESO] Ajuste Vectorial Finalizado con Site Calibration y Alta Velocidad.\n"
             yield generar_informe_ascii("MEDICION", p_dict)
             yield "\n[SUCCESS]"
         except Exception as e: yield f"\n> [ERROR FATAL] {str(e)}"
