@@ -1626,13 +1626,13 @@ def tab3_calibrar():
             t_sample_full = list(sd_suavizada.keys())
             total_eps = len(t_sample_full)
             
-            # [DETERMINISTA] Muestreo sistemático uniforme exacto para prevenir Timeout en Render
-            step = max(1, total_eps // 60)
+            # [DETERMINISTA OPTIMIZADO] Muestreo sistemático uniforme estricto a 120 épocas
+            step = max(1, total_eps // 120)
             t_sample = t_sample_full[::step]
             
             yield f"[PROGRESO OPTIMIZADOR RENDER] Muestreo Sistemático Determinista Activo:\n"
             yield f"  [-] Épocas totales en archivo: {total_eps}\n"
-            yield f"  [-] Épocas estadísticas a evaluar: {len(t_sample)} (Criterio: 1 época tomada cada {step} épocas de forma uniforme desde el inicio hasta el final)\n"
+            yield f"  [-] Épocas estadísticas a evaluar: {len(t_sample)} (Criterio: 1 época tomada cada {step} épocas, límite exacto 120)\n"
             
             yield "[PROGRESO] Fase 1: Extracción de Límites y Poblando Caché (Pre-Scan IRLS)...\n"
             coords_raw = []
@@ -1672,7 +1672,6 @@ def tab3_calibrar():
                 if time_out or os.path.exists(flag_file): break
                 yield f"  [+] Refinando espacio de búsqueda libre (Zoom {nivel+1}/{p_iter})...\n"
                 
-                # [LIBERADO] Se eliminan los límites artificiales min/max en Máscara y Factores Sigma
                 m_grid = [max(0.0, x) for x in [m_center - m_span, m_center, m_center + m_span]]
                 cp_grid = [max(0.1, x) for x in [cp_center - cp_span, cp_center, cp_center + cp_span]]
                 ca_grid = [max(0.1, x) for x in [ca_center - ca_span, ca_center, ca_center + ca_span]]
@@ -1683,8 +1682,9 @@ def tab3_calibrar():
                 for m in set(m_grid):
                     if time_out or os.path.exists(flag_file): break
                     
-                    if time.time() - start_time > 26.0:
-                        yield "\n> [ALERTA] Salvavidas Time-Box (26.0s) activado. Abortando iteraciones para evitar Error 504.\n"
+                    # Freno de mano estricto a los 28.0 segundos (margen seguro para Render)
+                    if time.time() - start_time > 28.0:
+                        yield "\n> [ALERTA] Freno de mano activado (28.0s). Abortando bucles para evitar el timeout de Render.\n"
                         time_out = True
                         break
 
@@ -1831,7 +1831,7 @@ def tab4_procesar():
             global_pdop = 99.9
             global_lambda = 0.0
 
-            yield f"\n> [SISTEMA] Iniciando Procesamiento Definitivo 100% Épocas | {modo_str} (IRLS + ENU | max_gap={p_max_gap}s)...\n"
+            yield f"\n> [SISTEMA] Iniciando Procesamiento Definitivo Épocas Optimizadas | {modo_str} (IRLS + ENU | max_gap={p_max_gap}s)...\n"
             yield "[PROGRESO] Extrayendo Observables Diferenciales con interpolación temporal flexible...\n"
             
             rover_tows = sorted(list(obs_r_raw.keys()), key=lambda k: obs_r_raw[k].get('_meta', (0,0,0,0,0,0)))
@@ -1852,6 +1852,12 @@ def tab4_procesar():
             t_eps = len(sd_suavizada); c = 0
             for t in sd_suavizada:
                 c += 1
+                
+                # Freno de mano estricto a los 28.0 segundos en procesamiento masivo
+                if time.time() - start_time > 28.0:
+                    yield "\n> [ALERTA] Freno de mano de 28.0s alcanzado. Generando informe con las épocas procesadas hasta el momento...\n"
+                    break
+
                 if c % max(1, t_eps // 10) == 0: yield f"[PROGRESO] Resolviendo Matrices IRLS DGPS (ENU)... {int((c / float(t_eps)) * 100.0)}%\n"
                 
                 if modo_str == "MODO_D_DGPS": sem, status, pdop_val = calcular_IRLS_MODO_D(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, p_mask, geom_cache=None)
