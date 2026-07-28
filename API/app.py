@@ -704,9 +704,9 @@ def calcular_posicion_satelite_wgs84(eph, t_emision, tau_vuelo, sys_char='G'):
     return (xs * math.cos(theta) + ys * math.sin(theta), -xs * math.sin(theta) + ys * math.cos(theta), zs, dt_sat)
 
 # =====================================================================
-# ENRUTADOR AUTOMÁTICO INTELIGENTE (ADAPTADO DE app16.py)
+# ENRUTADOR AUTOMÁTICO BASADO EN SELECCIÓN DE INTERFAZ DE USUARIO
 # =====================================================================
-def analizar_calidad_y_senales_rinex(obs_b, obs_r, max_gap_tolerado=0.5):
+def analizar_calidad_y_senales_rinex(obs_b, obs_r, modo_hardware="iguales", max_gap_tolerado=0.5):
     tows_b = sorted(list(obs_b.keys()), key=lambda k: obs_b[k].get('_meta', (0,0,0,0,0,0)))
     tows_r = sorted(list(obs_r.keys()), key=lambda k: obs_r[k].get('_meta', (0,0,0,0,0,0)))
     
@@ -724,10 +724,10 @@ def analizar_calidad_y_senales_rinex(obs_b, obs_r, max_gap_tolerado=0.5):
                 break
         if tiene_l5_real: break
 
-    if tiene_l5_real:
-        return "MODO_B_ASINCRONO", ratio_sync, "Análisis de Señal: Doble frecuencia L1/L5 detectada -> Enrutando a Módulo B (IRLS con ENU Riguroso)."
+    if tiene_l5_real and modo_hardware != "iguales":
+        return "MODO_B_ASINCRONO", ratio_sync, "Análisis de Señal: L1/L5 detectada y Teléfonos Distintos -> Enrutando a Módulo B (Asincrónico)."
     else:
-        return "MODO_D_DGPS", ratio_sync, "Análisis de Señal: Monofrecuencia o Código Puro -> Enrutando a Módulo D (DGPS Código Puro Estricto con ENU)."
+        return "MODO_D_DGPS", ratio_sync, "Análisis de Señal: Código Puro o Teléfonos Iguales -> Enrutando a Módulo D (DGPS Estricto)."
 
 # =====================================================================
 # AISLAMIENTO DE OBSERVABLES (MODO B Y MODO D)
@@ -1445,7 +1445,7 @@ def tab1_homogenizar():
             rover_raw_dict = parse_rinex_obs_completo(p_r_raw)
             
             yield "> [ENRUTADOR] Evaluando calidad y señales RINEX...\n"
-            modo_str, ratio, msg = analizar_calidad_y_senales_rinex(base_raw_dict, rover_raw_dict, modo_hardware=modo_hardware)
+            modo_str, ratio, msg = analizar_calidad_y_senales_rinex(base_raw_dict, rover_raw_dict, modo_hardware=modo_hardware, max_gap_tolerado=2.0)
             yield f"  [-] Módulo pre-asignado: {modo_str}\n"
             yield f"  [-] Justificación: {msg}\n\n"
             
@@ -1593,7 +1593,6 @@ def tab3_calibrar():
 
     p_max_gap = safe_f(request.form.get('param_max_gap'), 2.0)
     p_snr = safe_f(request.form.get('param_snr'), 25.0)
-    # LÓGICA DE VELOCIDAD MEJORADA: Iteraciones optimizadas por defecto a 3 para evitar bloqueos largos (ahorro de tiempo)
     p_iter = max(1, safe_i(request.form.get('param_iter'), 3))
 
     def procesar():
@@ -1620,7 +1619,7 @@ def tab3_calibrar():
             nav = parse_rinex_nav_real(nav_path)
             sp3 = parse_sp3_preciso(sp3_path)
             
-            modo_str, ratio, msg = analizar_calidad_y_senales_rinex(obs_b_raw, obs_r_raw, modo_hardware=modo_hardware)
+            modo_str, ratio, msg = analizar_calidad_y_senales_rinex(obs_b_raw, obs_r_raw, modo_hardware=modo_hardware, max_gap_tolerado=p_max_gap)
             yield f"> [ENRUTADOR] Análisis completado: {msg}\n"
             
             lat_b, lon_b, _ = utm_a_geodesicas(utm_e, utm_n, utm_h, utm_hem)
@@ -1636,7 +1635,6 @@ def tab3_calibrar():
             
             t_sample_full = list(sd_suavizada.keys())
             total_eps = len(t_sample_full)
-            # ACELERADOR INTELIGENTE DE TIEMPO (DECIMACIÓN DINÁMICA DE MUESTRA PARA VELOCIDAD EXTREMA)
             step = max(1, total_eps // 30)
             t_sample = t_sample_full[::step][:30]
             
@@ -1744,7 +1742,6 @@ def tab3_calibrar():
                 guardar_estado('opt_eh', float(best_params['eh']))
                 guardar_estado('opt_ev', float(best_params['ev']))
                 
-                # INYECCIÓN DE CALIBRACIÓN EMPÍRICA DE SITIO (SITE CALIBRATION)
                 guardar_estado('opt_bias_n', float(best_params['dn']))
                 guardar_estado('opt_bias_e', float(best_params['de']))
                 guardar_estado('opt_bias_z', float(best_params['dz']))
@@ -1835,7 +1832,7 @@ def tab4_procesar():
             nav = parse_rinex_nav_real(nav_path)
             sp3 = parse_sp3_preciso(sp3_path)
             
-            modo_str, ratio, msg = analizar_calidad_y_senales_rinex(obs_b_raw, obs_r_raw, modo_hardware=modo_hardware)
+            modo_str, ratio, msg = analizar_calidad_y_senales_rinex(obs_b_raw, obs_r_raw, modo_hardware=modo_hardware, max_gap_tolerado=p_max_gap)
             yield f"> [ENRUTADOR] Análisis completado: {msg}\n"
             
             lat_b, lon_b, _ = utm_a_geodesicas(utm_e, utm_n, utm_h, utm_hem)
@@ -1889,7 +1886,6 @@ def tab4_procesar():
             bias_e = safe_f(leer_estado('opt_bias_e'), 0.0)
             bias_z = safe_f(leer_estado('opt_bias_z'), 0.0)
             
-            # APLICACIÓN DE CALIBRACIÓN DE SITIO (SITE CALIBRATION) RECUPERADA DE app16.py
             nf_final = float(nf) - float(bias_n)
             ef_final = float(ef) - float(bias_e)
             zf_final_ground = float(zf) - float(bias_z) 
