@@ -1327,7 +1327,7 @@ def generar_informe_ascii(tipo, p_dict):
   [-] Tiempo de Ejecución    : {f_14(p_dict.get('t_exec', 0.0))} segundos
   [-] Tolerancia Horizontal  : {err_h_str}
   [-] Tolerancia Vertical    : {err_v_str}
-  [-] Máscara Elevación      : {f_14(p_dict['mask'])}° (Optimizado >= 2.0°)
+  [-] Máscara Elevación      : {f_14(p_dict['mask'])}° (Optimizado libre)
   [-] Filtro Planimétrico    : {f_14(p_dict['cp'])} Sigma
   [-] Filtro Altimétrico     : {f_14(p_dict['ca'])} Sigma
   [-] Tolerancia Sync (Dinam): {f_14(p_dict.get('max_gap', 2.0))} s
@@ -1617,7 +1617,7 @@ def tab3_calibrar():
 
             geom_cache = {}
 
-            yield f"> [SISTEMA] Iniciando Búsqueda Determinista Rápida | {modo_str} (IRLS + ENU | max_gap={p_max_gap}s | iter={p_iter})...\n"
+            yield f"> [SISTEMA] Iniciando Búsqueda Determinista Libre | {modo_str} (IRLS + ENU | max_gap={p_max_gap}s | iter={p_iter})...\n"
             if modo_str == "MODO_D_DGPS": sd_suavizada = aislar_diferencias_MODO_D(obs_b_raw, obs_r_raw)
             else: sd_suavizada = aislar_diferencias_MODO_B(obs_b_raw, obs_r_raw)
             
@@ -1625,12 +1625,11 @@ def tab3_calibrar():
             
             t_sample_full = list(sd_suavizada.keys())
             total_eps = len(t_sample_full)
-            step = max(1, total_eps // 30)
-            t_sample = t_sample_full[::step][:30]
+            # [LIBERADO] Se evalúa el 100% de las épocas disponibles sin límite artificial de 30
+            t_sample = t_sample_full
             
-            yield f"[PROGRESO OPTIMIZADOR RENDER] Decimación Dinámica Acelerada Activa:\n"
-            yield f"  [-] Épocas totales en archivo: {total_eps}\n"
-            yield f"  [-] Épocas estadísticas a evaluar: {len(t_sample)} (Salto: 1 cada {step} para calibrar al instante)\n"
+            yield f"[PROGRESO OPTIMIZADOR RENDER] Procesamiento Completo Activo:\n"
+            yield f"  [-] Épocas totales evaluadas: {total_eps} (100% de cobertura sin restricción de muestra)\n"
             
             yield "[PROGRESO] Fase 1: Extracción de Límites y Poblando Caché (Pre-Scan IRLS)...\n"
             coords_raw = []
@@ -1656,7 +1655,7 @@ def tab3_calibrar():
             yield f"  [*] Límite Horizontal Inyectado: {f_14(best_eh)} m\n"
             yield f"  [*] Límite Vertical Inyectado: {f_14(best_ev)} m\n\n"
             
-            yield f"[PROGRESO] Fase 2: Malla Tridimensional Acelerada ({p_iter} Iteraciones de alta velocidad)...\n"
+            yield f"[PROGRESO] Fase 2: Malla Tridimensional Acelerada Libre ({p_iter} Iteraciones)...\n"
             global_best_score = float('inf')
             best_rmse = float('inf')
             best_params = {}
@@ -1668,10 +1667,12 @@ def tab3_calibrar():
             time_out = False
             for nivel in range(p_iter):
                 if time_out or os.path.exists(flag_file): break
-                yield f"  [+] Refinando espacio de búsqueda (Zoom {nivel+1}/{p_iter})...\n"
-                m_grid = [max(2.0, min(10.0, x)) for x in [m_center - m_span, m_center, m_center + m_span]]
-                cp_grid = [max(0.8, min(5.0, x)) for x in [cp_center - cp_span, cp_center, cp_center + cp_span]]
-                ca_grid = [max(0.8, min(5.0, x)) for x in [ca_center - ca_span, ca_center, ca_center + ca_span]]
+                yield f"  [+] Refinando espacio de búsqueda libre (Zoom {nivel+1}/{p_iter})...\n"
+                
+                # [LIBERADO] Se eliminan los límites artificiales min/max en Máscara y Factores Sigma
+                m_grid = [max(0.0, x) for x in [m_center - m_span, m_center, m_center + m_span]]
+                cp_grid = [max(0.1, x) for x in [cp_center - cp_span, cp_center, cp_center + cp_span]]
+                ca_grid = [max(0.1, x) for x in [ca_center - ca_span, ca_center, ca_center + ca_span]]
                 
                 nivel_best_rmse = float('inf')
                 nivel_best_params = {}
@@ -1741,7 +1742,7 @@ def tab3_calibrar():
                     yield "\n> [SISTEMA] SE FORZÓ LA DETENCIÓN DEL BUCLE. PROCEDIENDO A EXTRAER EL MEJOR DATO RECOPILADO...\n"
 
                 yield "\n========================================================\n"
-                yield f"      [INFORME] PARÁMETROS ÓPTIMOS ({modo_str})\n"
+                yield f"      [INFORME] PARÁMETROS ÓPTIMOS LIBRES ({modo_str})\n"
                 yield "========================================================\n"
                 yield f"  [-] Fecha y Hora de Cálculo: {fecha_calculo}\n"
                 yield f"  [-] Tiempo de Ejecución Script: {f_14(t_exec_script)} segundos\n"
@@ -1868,7 +1869,6 @@ def tab4_procesar():
                 
             nf, ef, zf, std_n, std_e, std_z, ret, fix_ratio = res_estadistica
             
-            # [CÁLCULO GEODÉSICO PURO SIN CALIBRACIÓN EMPÍRICA / SIN DATOS FORZADOS]
             nf_final = float(nf)
             ef_final = float(ef)
             zf_final_ground = float(zf)
