@@ -1625,11 +1625,14 @@ def tab3_calibrar():
             
             t_sample_full = list(sd_suavizada.keys())
             total_eps = len(t_sample_full)
-            # [LIBERADO] Se evalúa el 100% de las épocas disponibles sin límite artificial de 30
-            t_sample = t_sample_full
             
-            yield f"[PROGRESO OPTIMIZADOR RENDER] Procesamiento Completo Activo:\n"
-            yield f"  [-] Épocas totales evaluadas: {total_eps} (100% de cobertura sin restricción de muestra)\n"
+            # [DETERMINISTA] Muestreo sistemático uniforme exacto para prevenir Timeout en Render
+            step = max(1, total_eps // 60)
+            t_sample = t_sample_full[::step]
+            
+            yield f"[PROGRESO OPTIMIZADOR RENDER] Muestreo Sistemático Determinista Activo:\n"
+            yield f"  [-] Épocas totales en archivo: {total_eps}\n"
+            yield f"  [-] Épocas estadísticas a evaluar: {len(t_sample)} (Criterio: 1 época tomada cada {step} épocas de forma uniforme desde el inicio hasta el final)\n"
             
             yield "[PROGRESO] Fase 1: Extracción de Límites y Poblando Caché (Pre-Scan IRLS)...\n"
             coords_raw = []
