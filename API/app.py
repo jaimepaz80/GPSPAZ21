@@ -1721,7 +1721,7 @@ def tab3_calibrar():
                                 if rmse_3d < global_best_score:
                                     global_best_score = rmse_3d
                                     best_rmse = rmse_3d
-                                    # [CORRECCIÓN GEODÉSICA ESTRICTA]: Almacenamiento vectorial directo de calibración (Real - Calculado)
+                                    # [CORRECCIÓN GEODÉSICA ESTRICTA]: Cálculo correcto del vector de calibración (Real - Calculado) para sumar aditivamente
                                     best_params = {'mask': float(m), 'cp': float(cp), 'ca': float(ca), 'eh': float(best_eh), 'ev': float(best_ev), 'max_gap': float(p_max_gap), 'snr': float(p_snr), 'rmse': float(rmse_3d), 'ret': int(ret), 'dn': float(utm_n_r - nf), 'de': float(utm_e_r - ef), 'dz': float(utm_c_r - zf)}
                 
                 if nivel_best_rmse != float('inf') and not time_out:
@@ -1802,7 +1802,7 @@ def tab4_procesar():
     url_rover_nuevo = request.form.get('url_rover_nuevo')
     
     if p_mask is None or utm_n is None:
-        return Response("> [ERROR FATAL] Parámetros o coordenadas no encontrados. Ejecute la Pestaña 3 primero.\n", mimetype='text/plain')
+        return Response("> [ERROR FATAL] Parámetros or coordenadas no encontrados. Ejecute la Pestaña 3 primero.\n", mimetype='text/plain')
 
     if not url_rover_nuevo or url_rover_nuevo.strip() == '': 
         return Response("> [ERROR] Falta el enlace de Drive del nuevo archivo RINEX Rover.\n", mimetype='text/plain')
@@ -1887,7 +1887,7 @@ def tab4_procesar():
             bias_e = safe_f(leer_estado('opt_bias_e'), 0.0)
             bias_z = safe_f(leer_estado('opt_bias_z'), 0.0)
             
-            # [CORRECCIÓN GEODÉSICA ESTRICTA]: Aplicación directa del vector de calibración de sitio (Suma aditiva para corrección vectorial)
+            # [CORRECCIÓN GEODÉSICA ESTRICTA]: Aplicación aditiva directa del vector de calibración de sitio para alinear a coordenadas reales
             nf_final = float(nf) + float(bias_n)
             ef_final = float(ef) + float(bias_e)
             zf_final_ground = float(zf) + float(bias_z) 
