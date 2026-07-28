@@ -34,9 +34,9 @@
             
             <div class="text-gray-300 text-sm space-y-3 mb-6 bg-gray-900 p-4 rounded border border-gray-700">
                 <p>¿Sabías que puedes obtener vectores espaciales de alta precisión sin necesidad de antenas externas?</p>
-                <p>Te presento <strong>GNSSJP PRO</strong>, una suite de procesamiento geodésico diferencial riguroso que utiliza el hardware de tu teléfono móvil Android para alcanzar resultados sub-métricos. Aplicamos proyecciones Topocéntricas y potentes filtros matemáticos IRLS para purgar el ruido de las señales.</p>
+                <p>Te presento <strong>GNSSJP PRO</strong>, una suite de procesamiento geodésico diferencial riguroso que utiliza el hardware de tu teléfono móvil Android (como equipos Honor o Tecno) para alcanzar resultados sub-métricos. Aplicamos proyecciones Topocéntricas y potentes filtros matemáticos IRLS para purgar el ruido de las señales.</p>
                 <blockquote class="border-l-4 border-green-500 pl-3 italic text-gray-400">
-                    "En esta profesión la regla de oro es clara: <strong>DATO MATA RELATO</strong>. No asumimos ni inventamos geometría; si sigues los protocolos estrictos de campo, el motor estocástico hará el resto."
+                    "En esta profesión la regla de oro es clara: <strong>DATO MATA RELATO</strong>. No asumimos ni inventamos geometría; si sigues los protocolos estrictos de campo (como el uso obligatorio de bastones topográficos), el motor estocástico hará el resto."
                 </blockquote>
                 
                 <div class="bg-purple-950/50 p-3 rounded border border-purple-800 text-center">
@@ -312,10 +312,21 @@
         let globalAudioCtx = null;
         let abortController = null;
 
-        // --- CONTROL DE PANTALLA DE BIENVENIDA ---
+        // --- CONTROL DE PANTALLA DE BIENVENIDA Y ESTADO ---
+        let bienvenidaAceptada = false;
+
         function avanzarDesdeBienvenida() {
+            bienvenidaAceptada = true;
             document.getElementById('welcome-screen').classList.add('hidden');
-            document.getElementById('login-container').classList.remove('hidden');
+            
+            // Evaluamos si Firebase ya validó la sesión en segundo plano
+            if (auth.currentUser) {
+                document.getElementById('login-container').classList.add('hidden');
+                document.getElementById('app-container').classList.remove('hidden');
+            } else {
+                document.getElementById('app-container').classList.add('hidden');
+                document.getElementById('login-container').classList.remove('hidden');
+            }
         }
 
         // --- INICIALIZACIÓN DE AUDIO (PREVENIR BLOQUEO AUTOPLAY) ---
@@ -359,7 +370,6 @@
             const loginContainer = document.getElementById('login-container');
             const appContainer = document.getElementById('app-container');
             const errorDiv = document.getElementById('login-error');
-            const welcomeScreen = document.getElementById('welcome-screen');
             
             if (user) {
                 const currentData = user.displayName; 
@@ -383,15 +393,21 @@
                 }
 
                 startSessionHeartbeat(user);
-                welcomeScreen.classList.add('hidden');
-                loginContainer.classList.add('hidden');
-                appContainer.classList.remove('hidden');
                 errorDiv.innerText = "";
                 document.getElementById('login-form').reset();
+                
+                // Solo alterar UI si el usuario ya pasó la pantalla de bienvenida
+                if (bienvenidaAceptada) {
+                    loginContainer.classList.add('hidden');
+                    appContainer.classList.remove('hidden');
+                }
             } else {
                 stopSessionHeartbeat();
-                appContainer.classList.add('hidden');
-                // Si el usuario ya vio la bienvenida previamente o se desloguea, manejamos el estado
+                // Solo alterar UI si el usuario ya pasó la pantalla de bienvenida
+                if (bienvenidaAceptada) {
+                    appContainer.classList.add('hidden');
+                    loginContainer.classList.remove('hidden');
+                }
             }
         });
 
