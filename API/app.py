@@ -1633,13 +1633,13 @@ def tab3_calibrar():
             t_sample_full = list(sd_suavizada.keys())
             total_eps = len(t_sample_full)
             
-            # [DETERMINISTA OPTIMIZADO] Muestreo sistemático uniforme estricto a 120 épocas
-            step = max(1, total_eps // 120)
+            # [DETERMINISTA OPTIMIZADO] Muestreo sistemático uniforme estricto a 135 épocas
+            step = max(1, total_eps // 135)
             t_sample = t_sample_full[::step]
             
             yield f"[PROGRESO OPTIMIZADOR RENDER] Muestreo Sistemático Determinista Activo:\n"
             yield f"  [-] Épocas totales en archivo: {total_eps}\n"
-            yield f"  [-] Épocas estadísticas a evaluar: {len(t_sample)} (Criterio: 1 época tomada cada {step} épocas, límite exacto 120)\n"
+            yield f"  [-] Épocas estadísticas a evaluar: {len(t_sample)} (Criterio: 1 época tomada cada {step} épocas, límite exacto 135)\n"
             
             yield "[PROGRESO] Fase 1: Extracción de Límites y Poblando Caché (Pre-Scan IRLS)...\n"
             coords_raw = []
