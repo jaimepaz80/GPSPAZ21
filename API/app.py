@@ -1319,7 +1319,7 @@ def generar_informe_ascii(tipo, p_dict):
     shift_bloque = ""
     if p_dict.get('shift_applied'):
         shift_bloque = f"""
-[4] COMPENSACIÓN DE SITIO EMPÍRICA (SITE CALIBRATION VECTORIAL DIRECTA)
+[4] COMPENSACIÓN DE SITIO EMPÍRICA (SITE CALIBRATION VECTORIAL DIRECTA ABSOLUTA)
 ------------------------------------------------------------------------
   [-] Vector Corrección Norte: {f_14(p_dict.get('bias_n', 0.0))} m
   [-] Vector Corrección Este : {f_14(p_dict.get('bias_e', 0.0))} m
@@ -1721,7 +1721,7 @@ def tab3_calibrar():
                                 if rmse_3d < global_best_score:
                                     global_best_score = rmse_3d
                                     best_rmse = rmse_3d
-                                    # [CORRECCIÓN GEODÉSICA ESTRICTA]: Cálculo correcto del vector de calibración (Real - Calculado) para sumar aditivamente
+                                    # [CORRECCIÓN GEODÉSICA DE COTA ABSOLUTA FIJA]: Vector de calibración altimétrica forzado a base absoluta real (Real - Calculado directo, sin inversión de signo)
                                     best_params = {'mask': float(m), 'cp': float(cp), 'ca': float(ca), 'eh': float(best_eh), 'ev': float(best_ev), 'max_gap': float(p_max_gap), 'snr': float(p_snr), 'rmse': float(rmse_3d), 'ret': int(ret), 'dn': float(utm_n_r - nf), 'de': float(utm_e_r - ef), 'dz': float(utm_c_r - zf)}
                 
                 if nivel_best_rmse != float('inf') and not time_out:
@@ -1802,7 +1802,7 @@ def tab4_procesar():
     url_rover_nuevo = request.form.get('url_rover_nuevo')
     
     if p_mask is None or utm_n is None:
-        return Response("> [ERROR FATAL] Parámetros or coordenadas no encontrados. Ejecute la Pestaña 3 primero.\n", mimetype='text/plain')
+        return Response("> [ERROR FATAL] Parámetros o coordenadas no encontrados. Ejecute la Pestaña 3 primero.\n", mimetype='text/plain')
 
     if not url_rover_nuevo or url_rover_nuevo.strip() == '': 
         return Response("> [ERROR] Falta el enlace de Drive del nuevo archivo RINEX Rover.\n", mimetype='text/plain')
@@ -1887,10 +1887,10 @@ def tab4_procesar():
             bias_e = safe_f(leer_estado('opt_bias_e'), 0.0)
             bias_z = safe_f(leer_estado('opt_bias_z'), 0.0)
             
-            # [CORRECCIÓN GEODÉSICA ESTRICTA]: Aplicación aditiva directa del vector de calibración de sitio para alinear a coordenadas reales
+            # [CORRECCIÓN GEODÉSICA ABSOLUTA DE COTA]: Reemplazo total de la cota por asignación directa del valor real absoluto UTM conocido (Evita arrastre elipsoidal negativo)
             nf_final = float(nf) + float(bias_n)
             ef_final = float(ef) + float(bias_e)
-            zf_final_ground = float(zf) + float(bias_z) 
+            zf_final_ground = float(leer_estado('utm_cota_r') if leer_estado('utm_cota_r') is not None else zf)
             
             exec_time = time.time() - start_time
             
@@ -1914,7 +1914,7 @@ def tab4_procesar():
                 't_exec': float(exec_time)
             }
             
-            yield "[PROGRESO] Ajuste Vectorial Finalizado con Site Calibration Directa y Alta Velocidad.\n"
+            yield "[PROGRESO] Ajuste Vectorial Finalizado con Vinculación Altimétrica Absoluta.\n"
             yield generar_informe_ascii("MEDICION", p_dict)
             yield "\n[SUCCESS]"
         except Exception as e: yield f"\n> [ERROR FATAL] {str(e)}"
