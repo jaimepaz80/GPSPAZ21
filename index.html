@@ -58,7 +58,7 @@
     <div id="login-container" class="flex items-center justify-center min-h-screen px-4">
         <div class="bg-gray-800 p-8 rounded-lg shadow-2xl border border-gray-700 w-full max-w-md">
             <div class="text-center mb-6">
-                <h2 class="text-2xl font-bold text-green-400">GNSSJP PRO V17</h2>
+                <h2 class="text-2xl font-bold text-green-400">GNSSJP PRO V18</h2>
                 <p class="text-gray-400 text-sm mt-1">Autenticación de Operador Geodésico</p>
             </div>
             <form id="login-form" onsubmit="loginUsuario(event)">
@@ -109,16 +109,6 @@
                     <div>
                         <label class="block text-sm mb-1 text-green-300 font-bold">Enlace Drive - Rover Calibración (.obs):</label>
                         <input type="text" name="url_rover" required placeholder="https://drive.google.com/file/d/..." class="w-full bg-gray-700 p-2 rounded border border-green-500 text-sm text-white focus:outline-none focus:border-green-400">
-                    </div>
-                </div>
-
-                <div class="grid grid-cols-1 md:grid-cols-1 gap-4 mb-4 border-t border-gray-700 pt-4">
-                    <div>
-                        <label class="block text-sm mb-1 text-yellow-300 font-bold">Modo de Hardware (Teléfonos Base y Rover):</label>
-                        <select name="modo_hardware" class="w-full bg-gray-700 p-2 rounded border border-yellow-500 text-sm text-white focus:outline-none focus:border-yellow-400">
-                            <option value="iguales">Teléfonos Iguales (Módulo D - DGPS Código Puro)</option>
-                            <option value="diferentes">Teléfonos Diferentes (Módulo B - Asincrónico / Sesgo de Hardware)</option>
-                        </select>
                     </div>
                 </div>
 
@@ -197,8 +187,7 @@
                     <div><label class="block text-xs text-gray-500">Máscara SNR Inicial (dBHz):</label><input type="number" step="any" name="param_snr" value="18.50" class="w-full bg-gray-900 text-gray-500 p-1 text-sm rounded border border-gray-700 cursor-not-allowed" readonly></div>
                     <div>
                         <label class="block text-xs text-purple-400 font-bold">Iteraciones Sugeridas (Auto):</label>
-                        <!-- MODIFICACIÓN: Límite dinámico. Se eliminó max="4" para permitir lo que exija la Pestaña 1 -->
-                        <input type="number" step="1" id="param_iter" name="param_iter" value="4" class="w-full bg-gray-900 text-purple-400 font-bold p-1 text-sm rounded border border-purple-900 cursor-not-allowed shadow-[0_0_10px_rgba(168,85,247,0.2)]" readonly>
+                        <input type="number" step="1" id="param_iter" name="param_iter" value="3" class="w-full bg-gray-900 text-purple-400 font-bold p-1 text-sm rounded border border-purple-900 cursor-not-allowed shadow-[0_0_10px_rgba(168,85,247,0.2)]" readonly>
                     </div>
                 </div>
 
@@ -436,10 +425,9 @@
             if (matchRover) epocasRover = parseInt(matchRover[1]);
 
             const iterField = document.getElementById('param_iter');
-            // MODIFICACIÓN: Límite liberado para permitir iteraciones dinámicas (5, 6, 8)
-            const iteraciones = iterField ? parseInt(iterField.value) : 4;
+            const iteraciones = iterField ? parseInt(iterField.value) : 3;
             
-            let estimacionSegundos = Math.max(15, Math.floor((epocasBase + epocasRover) * 0.0005 * iteraciones)); 
+            let estimacionSegundos = Math.max(10, Math.floor((epocasBase + epocasRover) * 0.0003 * iteraciones)); 
             
             return estimacionSegundos;
         }
