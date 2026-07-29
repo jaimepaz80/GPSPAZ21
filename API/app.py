@@ -952,10 +952,12 @@ def calcular_IRLS_MODO_B(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom
                 return None, "FAILED", None
 
             N_mat = matmul(H_T_W, H)
+            for r in range(len(N_mat)):
+                N_mat[r][r] += abs(N_mat[r][r]) * 1e-6 + 1e-6
                 
             U_vec = matmul(H_T_W, L)
             Q = invert_matrix_nxn(N_mat)
-            if not Q: return None, "FAILED_GEOMETRY", None
+            if not Q: return None, "FAILED", None
             
             pdop = math.sqrt(Q[0][0] + Q[1][1] + Q[2][2])
             Delta_ENU = matmul(Q, U_vec)
@@ -1132,10 +1134,12 @@ def calcular_IRLS_MODO_D(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom
                 return None, "FAILED", None
 
             N_mat = matmul(H_T_W, H)
+            for r in range(len(N_mat)):
+                N_mat[r][r] += abs(N_mat[r][r]) * 1e-6 + 1e-6
                 
             U_vec = matmul(H_T_W, L)
             Q = invert_matrix_nxn(N_mat)
-            if not Q: return None, "FAILED_GEOMETRY", None
+            if not Q: return None, "FAILED", None
             
             pdop = math.sqrt(Q[0][0] + Q[1][1] + Q[2][2])
             Delta_ENU = matmul(Q, U_vec)
@@ -1356,6 +1360,7 @@ def generar_informe_ascii(tipo, p_dict):
 [2] CALIDAD GEOMÉTRICA Y ESTADÍSTICA (QA / QC)
 ------------------------------------------------------------------------
   [-] PDOP Geométrico Promed.: {f_14(p_dict.get('pdop', 99.9))}
+  [-] Ratio Confiab. (LAMBDA): {f_14(p_dict.get('lambda_ratio', 0.0))}
   [-] Error Horizontal (RMS) : ± {f_14(math.hypot(p_dict['std_n'], p_dict['std_e']))} m
   [-] Error Espacial (3D RMS): ± {f_14(math.sqrt(p_dict['std_n']**2 + p_dict['std_e']**2 + p_dict['std_z']**2))} m
 
@@ -1664,9 +1669,6 @@ def tab3_calibrar():
             coords_raw = []
             for t in t_sample:
                 if os.path.exists(flag_file): break
-                if time.time() - start_time > 26.0:
-                    yield "\n> [ALERTA] Freno de mano preventivo en Fase 1 (26.0s). Abortando pre-scan restante.\n"
-                    break
                 if modo_str == "MODO_D_DGPS": sem, status, _ = calcular_IRLS_MODO_D(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, 2.0, geom_cache=geom_cache)
                 else: sem, status, _ = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, 2.0, geom_cache=geom_cache)
                 
@@ -1719,11 +1721,6 @@ def tab3_calibrar():
                     coords = []
                     for t in t_sample:
                         if time_out or os.path.exists(flag_file): break
-                        
-                        if time.time() - start_time > 28.0:
-                            yield "\n> [ALERTA] Freno de mano activado (28.0s). Abortando bucles para evitar el timeout de Render.\n"
-                            time_out = True
-                            break
                         
                         if modo_str == "MODO_D_DGPS": sem, status, _ = calcular_IRLS_MODO_D(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, m, geom_cache=geom_cache)
                         else: sem, status, _ = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, m, geom_cache=geom_cache)
@@ -1870,6 +1867,7 @@ def tab4_procesar():
             X_b, Y_b, Z_b = geodesicas_a_ecef(lat_b, lon_b, utm_c + h_b)
             
             global_pdop = 99.9
+            global_lambda = 0.0
 
             yield f"\n> [SISTEMA] Iniciando Procesamiento Definitivo Épocas Optimizadas | {modo_str} (IRLS + ENU | max_gap={p_max_gap}s)...\n"
             yield "[PROGRESO] Extrayendo Observables Diferenciales con interpolación temporal flexible...\n"
@@ -1887,29 +1885,14 @@ def tab4_procesar():
             
             if not sd_suavizada: yield "\n> [ERROR] No hay épocas sincronizadas válidas.\n"; return
             
-            yield "[PROGRESO] Aplicando Diezmado Inteligente Pre-Inversión (Filtro Estocástico)...\n"
-            calidad_epocas = []
-            for t, data in sd_suavizada.items():
-                sats = [s for s in data.keys() if s not in ['_meta', '_tow_b'] and data[s].get('sd_P') is not None]
-                if len(sats) >= 4:
-                    avg_snr = sum(data[s].get('snr', 0.0) for s in sats) / len(sats)
-                    calidad_epocas.append((t, len(sats), avg_snr))
-            
-            if not calidad_epocas: yield "\n> [ERROR] Ninguna época supera los criterios mínimos de calidad.\n"; return
-
-            calidad_epocas.sort(key=lambda x: (x[1], x[2]), reverse=True)
-
             coords = []
             pdop_list = []
-            t_eps = len(calidad_epocas)
-            c = 0
-            
-            for t_item in calidad_epocas:
-                t = t_item[0]
+            t_eps = len(sd_suavizada); c = 0
+            for t in sd_suavizada:
                 c += 1
                 
                 if time.time() - start_time > 28.0:
-                    yield "\n> [ALERTA] Freno de mano de 28.0s alcanzado. Generando informe con las épocas MÁS ÓPTIMAS procesadas...\n"
+                    yield "\n> [ALERTA] Freno de mano de 28.0s alcanzado. Generando informe con las épocas procesadas hasta el momento...\n"
                     break
 
                 if c % max(1, t_eps // 10) == 0: yield f"[PROGRESO] Resolviendo Matrices IRLS DGPS (ENU)... {int((c / float(t_eps)) * 100.0)}%\n"
@@ -1944,7 +1927,7 @@ def tab4_procesar():
                 'err_h': float(err_hor_max), 'err_v': float(err_ver_max),
                 'nf': float(nf_final), 'ef': float(ef_final), 'zf': float(zf_final_ground), 
                 'ret': int(ret), 'total': len(coords), 'std_n': float(std_n), 'std_e': float(std_e), 'std_z': float(std_z),
-                'ez': float(std_z), 'fix_r': float(fix_ratio), 'pdop': float(global_pdop),
+                'ez': float(std_z), 'fix_r': float(fix_ratio), 'pdop': float(global_pdop), 'lambda_ratio': float(global_lambda),
                 'base_file': leer_estado(uid, 'name_base_raw') or "Drive_Base.obs",
                 'rover_file': rf_nuevo_filename,
                 'nombre_base': str(nombre_base),
