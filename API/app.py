@@ -952,7 +952,6 @@ def calcular_IRLS_MODO_B(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom
                 return None, "FAILED", None
 
             N_mat = matmul(H_T_W, H)
-            # [CORRECCIÓN] Eliminada la regularización forzada de 1e-6. Si falla, es por geometría débil.
                 
             U_vec = matmul(H_T_W, L)
             Q = invert_matrix_nxn(N_mat)
@@ -1133,7 +1132,6 @@ def calcular_IRLS_MODO_D(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom
                 return None, "FAILED", None
 
             N_mat = matmul(H_T_W, H)
-            # [CORRECCIÓN] Eliminada la regularización forzada de 1e-6. Si falla, es por geometría débil.
                 
             U_vec = matmul(H_T_W, L)
             Q = invert_matrix_nxn(N_mat)
@@ -1327,7 +1325,6 @@ def generar_informe_ascii(tipo, p_dict):
     fecha_calculo = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     dist_baseline = math.sqrt((p_dict['b_n'] - p_dict['r_n_calc'])**2 + (p_dict['b_e'] - p_dict['r_e_calc'])**2 + (p_dict['b_z'] - p_dict['r_z_calc'])**2)
 
-    # [CORRECCIÓN] LAMBDA eliminado para sincerar el ajuste estocástico puro de código
     informe = f"""
 ========================================================================
              INFORME DE PROCESAMIENTO GNSSJP PRO (V18.3)
@@ -1667,6 +1664,9 @@ def tab3_calibrar():
             coords_raw = []
             for t in t_sample:
                 if os.path.exists(flag_file): break
+                if time.time() - start_time > 26.0:
+                    yield "\n> [ALERTA] Freno de mano preventivo en Fase 1 (26.0s). Abortando pre-scan restante.\n"
+                    break
                 if modo_str == "MODO_D_DGPS": sem, status, _ = calcular_IRLS_MODO_D(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, 2.0, geom_cache=geom_cache)
                 else: sem, status, _ = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, 2.0, geom_cache=geom_cache)
                 
@@ -1719,6 +1719,11 @@ def tab3_calibrar():
                     coords = []
                     for t in t_sample:
                         if time_out or os.path.exists(flag_file): break
+                        
+                        if time.time() - start_time > 28.0:
+                            yield "\n> [ALERTA] Freno de mano activado (28.0s). Abortando bucles para evitar el timeout de Render.\n"
+                            time_out = True
+                            break
                         
                         if modo_str == "MODO_D_DGPS": sem, status, _ = calcular_IRLS_MODO_D(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, m, geom_cache=geom_cache)
                         else: sem, status, _ = calcular_IRLS_MODO_B(sd_suavizada[t], nav, sp3, X_b, Y_b, Z_b, t, m, geom_cache=geom_cache)
@@ -1865,7 +1870,6 @@ def tab4_procesar():
             X_b, Y_b, Z_b = geodesicas_a_ecef(lat_b, lon_b, utm_c + h_b)
             
             global_pdop = 99.9
-            # [CORRECCIÓN] Eliminada variable falsa global_lambda = 0.0
 
             yield f"\n> [SISTEMA] Iniciando Procesamiento Definitivo Épocas Optimizadas | {modo_str} (IRLS + ENU | max_gap={p_max_gap}s)...\n"
             yield "[PROGRESO] Extrayendo Observables Diferenciales con interpolación temporal flexible...\n"
@@ -1884,7 +1888,6 @@ def tab4_procesar():
             if not sd_suavizada: yield "\n> [ERROR] No hay épocas sincronizadas válidas.\n"; return
             
             yield "[PROGRESO] Aplicando Diezmado Inteligente Pre-Inversión (Filtro Estocástico)...\n"
-            # [CORRECCIÓN] Evaluar calidad geométrica empírica de cada época antes de invertir
             calidad_epocas = []
             for t, data in sd_suavizada.items():
                 sats = [s for s in data.keys() if s not in ['_meta', '_tow_b'] and data[s].get('sd_P') is not None]
@@ -1894,7 +1897,6 @@ def tab4_procesar():
             
             if not calidad_epocas: yield "\n> [ERROR] Ninguna época supera los criterios mínimos de calidad.\n"; return
 
-            # Ordenar descendentemente: Más satélites primero, luego mayor SNR
             calidad_epocas.sort(key=lambda x: (x[1], x[2]), reverse=True)
 
             coords = []
@@ -1906,7 +1908,6 @@ def tab4_procesar():
                 t = t_item[0]
                 c += 1
                 
-                # Freno de mano intacto. Si se activa, garantiza que ya procesamos la crema y nata de los datos.
                 if time.time() - start_time > 28.0:
                     yield "\n> [ALERTA] Freno de mano de 28.0s alcanzado. Generando informe con las épocas MÁS ÓPTIMAS procesadas...\n"
                     break
