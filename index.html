@@ -623,7 +623,7 @@
             pBar.classList.add('from-purple-700', 'to-purple-400');
             pBar.classList.remove('from-red-800', 'to-red-500');
             pBar.style.width = '0%';
-            pText.innerText = "0%";
+            pText.innerText = '0%';
             pStatus.innerText = "Iniciando simulador Monte Carlo...";
             pStatus.classList.add('text-purple-300', 'animate-pulse');
             pStatus.classList.remove('text-red-400', 'font-bold', 'text-base', 'mt-4');
@@ -643,6 +643,7 @@
             e.preventDefault();
             const form = e.target;
             const data = new FormData(form);
+            data.append('uid', localToken); // <-- Inyección de token único para aislamiento de workspace
             const display = document.getElementById(consoleId);
             
             initAudio(); 
