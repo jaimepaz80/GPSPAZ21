@@ -952,12 +952,11 @@ def calcular_IRLS_MODO_B(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom
                 return None, "FAILED", None
 
             N_mat = matmul(H_T_W, H)
-            for r in range(len(N_mat)):
-                N_mat[r][r] += abs(N_mat[r][r]) * 1e-6 + 1e-6
+            # [CORRECCIÓN] Eliminada la regularización forzada de 1e-6. Si falla, es por geometría débil.
                 
             U_vec = matmul(H_T_W, L)
             Q = invert_matrix_nxn(N_mat)
-            if not Q: return None, "FAILED", None
+            if not Q: return None, "FAILED_GEOMETRY", None
             
             pdop = math.sqrt(Q[0][0] + Q[1][1] + Q[2][2])
             Delta_ENU = matmul(Q, U_vec)
@@ -1134,12 +1133,11 @@ def calcular_IRLS_MODO_D(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom
                 return None, "FAILED", None
 
             N_mat = matmul(H_T_W, H)
-            for r in range(len(N_mat)):
-                N_mat[r][r] += abs(N_mat[r][r]) * 1e-6 + 1e-6
+            # [CORRECCIÓN] Eliminada la regularización forzada de 1e-6. Si falla, es por geometría débil.
                 
             U_vec = matmul(H_T_W, L)
             Q = invert_matrix_nxn(N_mat)
-            if not Q: return None, "FAILED", None
+            if not Q: return None, "FAILED_GEOMETRY", None
             
             pdop = math.sqrt(Q[0][0] + Q[1][1] + Q[2][2])
             Delta_ENU = matmul(Q, U_vec)
@@ -1329,6 +1327,7 @@ def generar_informe_ascii(tipo, p_dict):
     fecha_calculo = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     dist_baseline = math.sqrt((p_dict['b_n'] - p_dict['r_n_calc'])**2 + (p_dict['b_e'] - p_dict['r_e_calc'])**2 + (p_dict['b_z'] - p_dict['r_z_calc'])**2)
 
+    # [CORRECCIÓN] LAMBDA eliminado para sincerar el ajuste estocástico puro de código
     informe = f"""
 ========================================================================
              INFORME DE PROCESAMIENTO GNSSJP PRO (V18.3)
@@ -1360,7 +1359,6 @@ def generar_informe_ascii(tipo, p_dict):
 [2] CALIDAD GEOMÉTRICA Y ESTADÍSTICA (QA / QC)
 ------------------------------------------------------------------------
   [-] PDOP Geométrico Promed.: {f_14(p_dict.get('pdop', 99.9))}
-  [-] Ratio Confiab. (LAMBDA): {f_14(p_dict.get('lambda_ratio', 0.0))}
   [-] Error Horizontal (RMS) : ± {f_14(math.hypot(p_dict['std_n'], p_dict['std_e']))} m
   [-] Error Espacial (3D RMS): ± {f_14(math.sqrt(p_dict['std_n']**2 + p_dict['std_e']**2 + p_dict['std_z']**2))} m
 
@@ -1867,7 +1865,7 @@ def tab4_procesar():
             X_b, Y_b, Z_b = geodesicas_a_ecef(lat_b, lon_b, utm_c + h_b)
             
             global_pdop = 99.9
-            global_lambda = 0.0
+            # [CORRECCIÓN] Eliminada variable falsa global_lambda = 0.0
 
             yield f"\n> [SISTEMA] Iniciando Procesamiento Definitivo Épocas Optimizadas | {modo_str} (IRLS + ENU | max_gap={p_max_gap}s)...\n"
             yield "[PROGRESO] Extrayendo Observables Diferenciales con interpolación temporal flexible...\n"
@@ -1885,14 +1883,32 @@ def tab4_procesar():
             
             if not sd_suavizada: yield "\n> [ERROR] No hay épocas sincronizadas válidas.\n"; return
             
+            yield "[PROGRESO] Aplicando Diezmado Inteligente Pre-Inversión (Filtro Estocástico)...\n"
+            # [CORRECCIÓN] Evaluar calidad geométrica empírica de cada época antes de invertir
+            calidad_epocas = []
+            for t, data in sd_suavizada.items():
+                sats = [s for s in data.keys() if s not in ['_meta', '_tow_b'] and data[s].get('sd_P') is not None]
+                if len(sats) >= 4:
+                    avg_snr = sum(data[s].get('snr', 0.0) for s in sats) / len(sats)
+                    calidad_epocas.append((t, len(sats), avg_snr))
+            
+            if not calidad_epocas: yield "\n> [ERROR] Ninguna época supera los criterios mínimos de calidad.\n"; return
+
+            # Ordenar descendentemente: Más satélites primero, luego mayor SNR
+            calidad_epocas.sort(key=lambda x: (x[1], x[2]), reverse=True)
+
             coords = []
             pdop_list = []
-            t_eps = len(sd_suavizada); c = 0
-            for t in sd_suavizada:
+            t_eps = len(calidad_epocas)
+            c = 0
+            
+            for t_item in calidad_epocas:
+                t = t_item[0]
                 c += 1
                 
+                # Freno de mano intacto. Si se activa, garantiza que ya procesamos la crema y nata de los datos.
                 if time.time() - start_time > 28.0:
-                    yield "\n> [ALERTA] Freno de mano de 28.0s alcanzado. Generando informe con las épocas procesadas hasta el momento...\n"
+                    yield "\n> [ALERTA] Freno de mano de 28.0s alcanzado. Generando informe con las épocas MÁS ÓPTIMAS procesadas...\n"
                     break
 
                 if c % max(1, t_eps // 10) == 0: yield f"[PROGRESO] Resolviendo Matrices IRLS DGPS (ENU)... {int((c / float(t_eps)) * 100.0)}%\n"
@@ -1927,7 +1943,7 @@ def tab4_procesar():
                 'err_h': float(err_hor_max), 'err_v': float(err_ver_max),
                 'nf': float(nf_final), 'ef': float(ef_final), 'zf': float(zf_final_ground), 
                 'ret': int(ret), 'total': len(coords), 'std_n': float(std_n), 'std_e': float(std_e), 'std_z': float(std_z),
-                'ez': float(std_z), 'fix_r': float(fix_ratio), 'pdop': float(global_pdop), 'lambda_ratio': float(global_lambda),
+                'ez': float(std_z), 'fix_r': float(fix_ratio), 'pdop': float(global_pdop),
                 'base_file': leer_estado(uid, 'name_base_raw') or "Drive_Base.obs",
                 'rover_file': rf_nuevo_filename,
                 'nombre_base': str(nombre_base),
