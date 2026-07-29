@@ -786,8 +786,10 @@ def aislar_diferencias_MODO_D(obs_b, obs_r):
             snr_b = d_b.get('S5', 30.0) if freq == 'C5' else d_b.get('S1', 30.0)
             snr_r = d_r.get('S5', 30.0) if freq == 'C5' else d_r.get('S1', 30.0)
             
+            sd_P = pr_r - pr_b
+            
             sd_epoca[s] = {
-                'sd_P': pr_r - pr_b,
+                'sd_P': sd_P,
                 'pr_b': pr_b, 'pr_r': pr_r,
                 'snr': min(snr_b, snr_r),
                 'sys': s[0]
@@ -921,7 +923,11 @@ def calcular_IRLS_MODO_B(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom
                 
                 el_rad_i = math.radians(data['el'])
                 el_rad_ref = math.radians(rc['el'])
-                w_P = (math.sin(el_rad_i) ** 2) * (math.sin(el_rad_ref) ** 2)
+                snr_i = data.get('snr', 30.0)
+                snr_ref = rc.get('snr', 30.0)
+                factor_snr_i = min(1.0, max(0.1, snr_i / 40.0))
+                factor_snr_ref = min(1.0, max(0.1, snr_ref / 40.0))
+                w_P = (math.sin(el_rad_i) ** 2) * (math.sin(el_rad_ref) ** 2) * factor_snr_i * factor_snr_ref
 
                 DD_P_obs = data['sd_P'] - rc['sd_P']
                 res_P = DD_P_obs - DD_P_calc
@@ -1099,7 +1105,11 @@ def calcular_IRLS_MODO_D(sd_epoca, nav, sp3, X_b, Y_b, Z_b, tr, mask_angle, geom
                 
                 el_rad_i = math.radians(data['el'])
                 el_rad_ref = math.radians(rc['el'])
-                w_P = (math.sin(el_rad_i) ** 2) * (math.sin(el_rad_ref) ** 2)
+                snr_i = data.get('snr', 30.0)
+                snr_ref = rc.get('snr', 30.0)
+                factor_snr_i = min(1.0, max(0.1, snr_i / 40.0))
+                factor_snr_ref = min(1.0, max(0.1, snr_ref / 40.0))
+                w_P = (math.sin(el_rad_i) ** 2) * (math.sin(el_rad_ref) ** 2) * factor_snr_i * factor_snr_ref
 
                 DD_P_obs = data['sd_P'] - rc['sd_P']
                 res_P = DD_P_obs - DD_P_calc
@@ -1552,7 +1562,7 @@ def tab2_efemerides():
                         continue
                 
                 if not descargado:
-                    raise Exception("HTTP 404/Timeout Total: La red IGS global bloqueó la conexión o el archivo no existe.")
+                    raise Exception("HTTP 404/Timeout Total: La red IGS global bloqueó la conexión o el archivo não existe.")
                 
                 yield "  [-] Descomprimiendo archivo NAV...\n"
                 with gzip.open(nav_gz, 'rb') as f_in, open(nav_path, 'wb') as f_out: 
@@ -1633,7 +1643,6 @@ def tab3_calibrar():
             t_sample_full = list(sd_suavizada.keys())
             total_eps = len(t_sample_full)
             
-            # [DETERMINISTA OPTIMIZADO] Muestreo sistemático uniforme estricto a 160 épocas
             step = max(1, total_eps // 160)
             t_sample = t_sample_full[::step]
             
@@ -1689,7 +1698,6 @@ def tab3_calibrar():
                 for m in set(m_grid):
                     if time_out or os.path.exists(flag_file): break
                     
-                    # Freno de mano estricto a los 28.0 segundos (margen seguro para Render)
                     if time.time() - start_time > 28.0:
                         yield "\n> [ALERTA] Freno de mano activado (28.0s). Abortando bucles para evitar el timeout de Render.\n"
                         time_out = True
@@ -1714,7 +1722,6 @@ def tab3_calibrar():
                             res = estadistica_desacoplada(coords, cp, ca, best_eh, best_ev)
                             if res[0] is None: continue
                             nf, ef, zf, std_n, std_e, std_z, ret, fix_ratio = res
-                            # Ecuación de calibración corregida a nivel de terreno
                             rmse_3d = math.sqrt((nf - utm_n_r)**2 + (ef - utm_e_r)**2 + ((zf - h_r) - utm_c_r)**2)
                             
                             if rmse_3d < nivel_best_rmse:
@@ -1865,7 +1872,6 @@ def tab4_procesar():
             for t in sd_suavizada:
                 c += 1
                 
-                # Freno de mano estricto a los 28.0 segundos en procesamiento masivo
                 if time.time() - start_time > 28.0:
                     yield "\n> [ALERTA] Freno de mano de 28.0s alcanzado. Generando informe con las épocas procesadas hasta el momento...\n"
                     break
@@ -1892,7 +1898,6 @@ def tab4_procesar():
             
             nf_final = float(nf)
             ef_final = float(ef)
-            # Descuento del bastón / antena Rover para obtener cota terreno final
             zf_final_ground = float(zf) - h_r_nuevo
             
             exec_time = time.time() - start_time
