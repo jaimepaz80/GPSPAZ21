@@ -19,11 +19,7 @@ app = Flask(__name__)
 # CONFIGURACIÓN DEL ENTORNO Y GESTIÓN DE ESTADO (AISLAMIENTO EN RAM)
 # =====================================================================
 BASE_DIR = tempfile.gettempdir()
-UPLOAD_FOLDER = os.path.join(BASE_DIR, 'temp_rinex')
 REPORT_FOLDER = os.path.join(BASE_DIR, 'informes')
-STATE_FILE = os.path.join(UPLOAD_FOLDER, 'estado_proyecto.json')
-
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(REPORT_FOLDER, exist_ok=True)
 
 STATE_LOCK = threading.Lock()
@@ -51,23 +47,30 @@ def safe_i(val, default=19):
     try: return int(val) if val and str(val).strip() != '' else default
     except: return default
 
-def guardar_estado(clave, valor):
+def get_workspace(uid):
+    ws = os.path.join(BASE_DIR, f'temp_rinex_{uid}')
+    os.makedirs(ws, exist_ok=True)
+    return ws
+
+def guardar_estado(uid, clave, valor):
+    state_file = os.path.join(get_workspace(uid), 'estado_proyecto.json')
     with STATE_LOCK:
         estado = {}
-        if os.path.exists(STATE_FILE):
+        if os.path.exists(state_file):
             try:
-                with open(STATE_FILE, 'r', encoding='utf-8') as f: estado = json.load(f)
+                with open(state_file, 'r', encoding='utf-8') as f: estado = json.load(f)
             except: pass
         estado[clave] = valor
         try:
-            with open(STATE_FILE, 'w', encoding='utf-8') as f: json.dump(estado, f)
+            with open(state_file, 'w', encoding='utf-8') as f: json.dump(estado, f)
         except: pass
 
-def leer_estado(clave):
+def leer_estado(uid, clave):
+    state_file = os.path.join(get_workspace(uid), 'estado_proyecto.json')
     with STATE_LOCK:
-        if os.path.exists(STATE_FILE):
+        if os.path.exists(state_file):
             try:
-                with open(STATE_FILE, 'r', encoding='utf-8') as f: return json.load(f).get(clave)
+                with open(state_file, 'r', encoding='utf-8') as f: return json.load(f).get(clave)
             except: pass
         return None
 
@@ -1387,17 +1390,23 @@ def index():
 
 @app.route('/API/interrumpir', methods=['POST'])
 def interrumpir_proceso():
-    with open(os.path.join(UPLOAD_FOLDER, 'interrupt.flag'), 'w') as f:
+    uid = request.form.get('uid', request.remote_addr)
+    ws = get_workspace(uid)
+    with open(os.path.join(ws, 'interrupt.flag'), 'w') as f:
         f.write("1")
     return Response("Interrumpido", status=200)
 
 @app.route('/API/tab1_homogenizar', methods=['POST'])
 def tab1_homogenizar():
     start_time = time.time()
+    
+    uid = request.form.get('uid', request.remote_addr)
+    ws = get_workspace(uid)
+    
     with STATE_LOCK:
-        if os.path.exists(UPLOAD_FOLDER):
-            shutil.rmtree(UPLOAD_FOLDER, ignore_errors=True)
-        os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+        if os.path.exists(ws):
+            shutil.rmtree(ws, ignore_errors=True)
+        os.makedirs(ws, exist_ok=True)
     
     url_base = request.form.get('url_base')
     url_rover = request.form.get('url_rover')
@@ -1418,25 +1427,25 @@ def tab1_homogenizar():
     nombre_rover = request.form.get('nombre_rover', 'ROVER_DESCONOCIDO')
     modo_hardware = request.form.get('modo_hardware', 'iguales')
 
-    guardar_estado('utm_norte', utm_n)
-    guardar_estado('utm_este', utm_e)
-    guardar_estado('utm_cota', utm_c)
-    guardar_estado('utm_huso', utm_h)
-    guardar_estado('utm_hemisferio', utm_hem)
-    guardar_estado('utm_norte_r', utm_n_r)
-    guardar_estado('utm_este_r', utm_e_r)
-    guardar_estado('utm_cota_r', utm_c_r)
-    guardar_estado('altura_base', h_b)
-    guardar_estado('altura_rover', h_r)
-    guardar_estado('nombre_base', nombre_base)
-    guardar_estado('nombre_rover', nombre_rover)
-    guardar_estado('modo_hardware', modo_hardware)
+    guardar_estado(uid, 'utm_norte', utm_n)
+    guardar_estado(uid, 'utm_este', utm_e)
+    guardar_estado(uid, 'utm_cota', utm_c)
+    guardar_estado(uid, 'utm_huso', utm_h)
+    guardar_estado(uid, 'utm_hemisferio', utm_hem)
+    guardar_estado(uid, 'utm_norte_r', utm_n_r)
+    guardar_estado(uid, 'utm_este_r', utm_e_r)
+    guardar_estado(uid, 'utm_cota_r', utm_c_r)
+    guardar_estado(uid, 'altura_base', h_b)
+    guardar_estado(uid, 'altura_rover', h_r)
+    guardar_estado(uid, 'nombre_base', nombre_base)
+    guardar_estado(uid, 'nombre_rover', nombre_rover)
+    guardar_estado(uid, 'modo_hardware', modo_hardware)
     
     if not url_base or not url_rover: 
         return Response("> [ERROR CRÍTICO] Enlaces de Google Drive faltantes.\n", mimetype='text/plain')
     
-    p_b_raw = os.path.join(UPLOAD_FOLDER, 'base_raw.obs')
-    p_r_raw = os.path.join(UPLOAD_FOLDER, 'rover_calibracion_raw.obs')
+    p_b_raw = os.path.join(ws, 'base_raw.obs')
+    p_r_raw = os.path.join(ws, 'rover_calibracion_raw.obs')
 
     def procesar():
         try:
@@ -1470,19 +1479,19 @@ def tab1_homogenizar():
                     rover_sinc[tr] = rover_raw_dict[tr]
             
             if not base_sinc: yield "\n> [ERROR FATAL] Cero épocas en común. Revisar rango horario."; return
-            p_b_h = os.path.join(UPLOAD_FOLDER, 'base_calib_homo.obs')
-            p_r_h = os.path.join(UPLOAD_FOLDER, 'rover_calib_homo.obs')
+            p_b_h = os.path.join(ws, 'base_calib_homo.obs')
+            p_r_h = os.path.join(ws, 'rover_calib_homo.obs')
             generar_rinex_sincronizado(p_b_raw, p_b_h, base_sinc)
             generar_rinex_sincronizado(p_r_raw, p_r_h, rover_sinc)
             
-            guardar_estado('base_raw', p_b_raw)
-            guardar_estado('base_calib_homo', p_b_h)
-            guardar_estado('rover_calib_homo', p_r_h)
+            guardar_estado(uid, 'base_raw', p_b_raw)
+            guardar_estado(uid, 'base_calib_homo', p_b_h)
+            guardar_estado(uid, 'rover_calib_homo', p_r_h)
             
             name_base = "Drive_Base_Pivote.obs"
             name_rover = "Drive_Rover_Calib.obs"
-            guardar_estado('name_base_raw', name_base)
-            guardar_estado('name_rover_calib_raw', name_rover)
+            guardar_estado(uid, 'name_base_raw', name_base)
+            guardar_estado(uid, 'name_rover_calib_raw', name_rover)
             
             c_base = {'N': utm_n, 'E': utm_e, 'Z': utm_c}
             c_rover = {'N': utm_n_r, 'E': utm_e_r, 'Z': utm_c_r}
@@ -1497,17 +1506,20 @@ def tab1_homogenizar():
 
 @app.route('/API/tab2_efemerides', methods=['POST'])
 def tab2_efemerides():
+    uid = request.form.get('uid', request.remote_addr)
+    ws = get_workspace(uid)
+    
     f_sp3 = request.files.get('file_sp3')
     
     sp3_path = None
     if f_sp3 and f_sp3.filename != '':
-        sp3_path = os.path.join(UPLOAD_FOLDER, 'manual_sp3.sp3')
+        sp3_path = os.path.join(ws, 'manual_sp3.sp3')
         f_sp3.save(sp3_path)
-        guardar_estado('sp3_path', sp3_path)
-        guardar_estado('name_sp3_file', f_sp3.filename)
+        guardar_estado(uid, 'sp3_path', sp3_path)
+        guardar_estado(uid, 'name_sp3_file', f_sp3.filename)
     else:
-        guardar_estado('sp3_path', None)
-        guardar_estado('name_sp3_file', None)
+        guardar_estado(uid, 'sp3_path', None)
+        guardar_estado(uid, 'name_sp3_file', None)
 
     def procesar():
         try:
@@ -1518,7 +1530,7 @@ def tab2_efemerides():
                 yield "  [!] ALERTA CRÍTICA: No se detectó archivo SP3. Los módulos bloquearán el cálculo en las siguientes pestañas.\n"
 
             yield "\n> [RED] Conectando con Red Global de Repositorios GNSS (Extracción Ionosférica NAV)...\n"
-            bp = leer_estado('base_raw')
+            bp = leer_estado(uid, 'base_raw')
             if not bp or not os.path.exists(bp): 
                 yield "> [ERROR FATAL] Falta RINEX Base en memoria para extraer fecha.\n"; return
             
@@ -1530,8 +1542,8 @@ def tab2_efemerides():
             doy = dt.timetuple().tm_yday
             yy = str(year)[-2:]
             
-            nav_gz = os.path.join(UPLOAD_FOLDER, f"auto_nav_{year}_{doy:03d}.nav.gz")
-            nav_path = os.path.join(UPLOAD_FOLDER, f"auto_nav_{year}_{doy:03d}.nav")
+            nav_gz = os.path.join(ws, f"auto_nav_{year}_{doy:03d}.nav.gz")
+            nav_path = os.path.join(ws, f"auto_nav_{year}_{doy:03d}.nav")
             
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
@@ -1562,7 +1574,7 @@ def tab2_efemerides():
                         continue
                 
                 if not descargado:
-                    raise Exception("HTTP 404/Timeout Total: La red IGS global bloqueó la conexión o el archivo não existe.")
+                    raise Exception("HTTP 404/Timeout Total: La red IGS global bloqueó la conexión o el archivo no existe.")
                 
                 yield "  [-] Descomprimiendo archivo NAV...\n"
                 with gzip.open(nav_gz, 'rb') as f_in, open(nav_path, 'wb') as f_out: 
@@ -1570,8 +1582,8 @@ def tab2_efemerides():
                 
                 if os.path.exists(nav_gz): os.remove(nav_gz)
             
-            guardar_estado('nav_path', nav_path)
-            guardar_estado('name_nav_file', os.path.basename(nav_path))
+            guardar_estado(uid, 'nav_path', nav_path)
+            guardar_estado(uid, 'name_nav_file', os.path.basename(nav_path))
             yield f"  [-] Archivo NAV listo y ensamblado en memoria.\n\n[SUCCESS]"
         except Exception as e:
             yield f"\n> [ERROR FATAL] Fallo en descarga automática NAV: {str(e)}\n"
@@ -1582,21 +1594,24 @@ def tab2_efemerides():
 def tab3_calibrar():
     start_time = time.time()
     
-    flag_file = os.path.join(UPLOAD_FOLDER, 'interrupt.flag')
+    uid = request.form.get('uid', request.remote_addr)
+    ws = get_workspace(uid)
+    
+    flag_file = os.path.join(ws, 'interrupt.flag')
     if os.path.exists(flag_file):
         os.remove(flag_file)
         
-    utm_n = leer_estado('utm_norte')
-    utm_e = leer_estado('utm_este')
-    utm_c = leer_estado('utm_cota')
-    utm_h = leer_estado('utm_huso')
-    utm_hem = leer_estado('utm_hemisferio')
-    utm_n_r = leer_estado('utm_norte_r')
-    utm_e_r = leer_estado('utm_este_r')
-    utm_c_r = leer_estado('utm_cota_r')
-    h_b = safe_f(leer_estado('altura_base'), 0.0)
-    h_r = safe_f(leer_estado('altura_rover'), 0.0)
-    modo_hardware = leer_estado('modo_hardware') or 'iguales'
+    utm_n = leer_estado(uid, 'utm_norte')
+    utm_e = leer_estado(uid, 'utm_este')
+    utm_c = leer_estado(uid, 'utm_cota')
+    utm_h = leer_estado(uid, 'utm_huso')
+    utm_hem = leer_estado(uid, 'utm_hemisferio')
+    utm_n_r = leer_estado(uid, 'utm_norte_r')
+    utm_e_r = leer_estado(uid, 'utm_este_r')
+    utm_c_r = leer_estado(uid, 'utm_cota_r')
+    h_b = safe_f(leer_estado(uid, 'altura_base'), 0.0)
+    h_r = safe_f(leer_estado(uid, 'altura_rover'), 0.0)
+    modo_hardware = leer_estado(uid, 'modo_hardware') or 'iguales'
 
     p_max_gap = safe_f(request.form.get('param_max_gap'), 2.0)
     p_snr = safe_f(request.form.get('param_snr'), 25.0)
@@ -1607,10 +1622,10 @@ def tab3_calibrar():
             if utm_e == 0.0 or utm_n == 0.0 or utm_n_r == 0.0 or utm_e_r == 0.0: 
                 yield "> [ERROR] Coordenadas Base y Rover no inyectadas correctamente.\n"; return
             
-            nav_path = leer_estado('nav_path')
-            sp3_path = leer_estado('sp3_path')
-            p_b_h = leer_estado('base_calib_homo')
-            p_r_h = leer_estado('rover_calib_homo')
+            nav_path = leer_estado(uid, 'nav_path')
+            sp3_path = leer_estado(uid, 'sp3_path')
+            p_b_h = leer_estado(uid, 'base_calib_homo')
+            p_r_h = leer_estado(uid, 'rover_calib_homo')
 
             if not p_b_h or not p_r_h: 
                 yield "> [ERROR FATAL] Faltan archivos RINEX. Ve a la Pestaña 1.\n"; return
@@ -1743,15 +1758,15 @@ def tab3_calibrar():
                     m_span /= 2.0; cp_span /= 2.0; ca_span /= 2.0
             
             if best_rmse != float('inf'):
-                guardar_estado('opt_mask', float(best_params['mask']))
-                guardar_estado('opt_cp', float(best_params['cp']))
-                guardar_estado('opt_ca', float(best_params['ca']))
-                guardar_estado('opt_max_gap', float(best_params.get('max_gap', p_max_gap)))
-                guardar_estado('opt_snr', float(best_params.get('snr', p_snr)))
-                guardar_estado('opt_eh', float(best_params['eh']))
-                guardar_estado('opt_ev', float(best_params['ev']))
+                guardar_estado(uid, 'opt_mask', float(best_params['mask']))
+                guardar_estado(uid, 'opt_cp', float(best_params['cp']))
+                guardar_estado(uid, 'opt_ca', float(best_params['ca']))
+                guardar_estado(uid, 'opt_max_gap', float(best_params.get('max_gap', p_max_gap)))
+                guardar_estado(uid, 'opt_snr', float(best_params.get('snr', p_snr)))
+                guardar_estado(uid, 'opt_eh', float(best_params['eh']))
+                guardar_estado(uid, 'opt_ev', float(best_params['ev']))
                 
-                guardar_estado('estrategia_activa', modo_str)
+                guardar_estado(uid, 'estrategia_activa', modo_str)
                 
                 fecha_calculo = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 t_exec_script = time.time() - start_time
@@ -1762,8 +1777,8 @@ def tab3_calibrar():
                 yield "\n========================================================\n"
                 yield f"      [INFORME] PARÁMETROS ÓPTIMOS LIBRES ({modo_str})\n"
                 yield "========================================================\n"
-                yield f"  [-] Punto Base (Pivote): {leer_estado('nombre_base')}\n"
-                yield f"  [-] Punto Rover (Calib): {leer_estado('nombre_rover')}\n"
+                yield f"  [-] Punto Base (Pivote): {leer_estado(uid, 'nombre_base')}\n"
+                yield f"  [-] Punto Rover (Calib): {leer_estado(uid, 'nombre_rover')}\n"
                 yield f"  [-] Fecha y Hora de Cálculo: {fecha_calculo}\n"
                 yield f"  [-] Tiempo de Ejecución Script: {f_14(t_exec_script)} segundos\n"
                 yield f"  [-] Coord. Base Fija (N,E,Z): {f_14(utm_n)}, {f_14(utm_e)}, {f_14(utm_c)}\n"
@@ -1788,22 +1803,26 @@ def tab3_calibrar():
 @app.route('/API/tab4_procesar', methods=['POST'])
 def tab4_procesar():
     start_time = time.time()
-    utm_n = safe_f(leer_estado('utm_norte'), 0.0)
-    utm_e = safe_f(leer_estado('utm_este'), 0.0)
-    utm_c = safe_f(leer_estado('utm_cota'), 0.0)
-    utm_h = safe_i(leer_estado('utm_huso'), 19)
-    utm_hem = leer_estado('utm_hemisferio') or 'N'
-    h_b = safe_f(leer_estado('altura_base'), 0.0)
-    modo_hardware = leer_estado('modo_hardware') or 'iguales'
-    nombre_base = leer_estado('nombre_base') or 'BASE_DESCONOCIDA'
     
-    p_mask = safe_f(leer_estado('opt_mask'), 3.5)
-    p_cp = safe_f(leer_estado('opt_cp'), 2.0)
-    p_ca = safe_f(leer_estado('opt_ca'), 2.0)
-    err_hor_max = safe_f(leer_estado('opt_eh'), 0.0)
-    err_ver_max = safe_f(leer_estado('opt_ev'), 0.0)
-    p_max_gap = safe_f(leer_estado('opt_max_gap'), 2.0)
-    estrategia = leer_estado('estrategia_activa') or "MODO_D_DGPS"
+    uid = request.form.get('uid', request.remote_addr)
+    ws = get_workspace(uid)
+    
+    utm_n = safe_f(leer_estado(uid, 'utm_norte'), 0.0)
+    utm_e = safe_f(leer_estado(uid, 'utm_este'), 0.0)
+    utm_c = safe_f(leer_estado(uid, 'utm_cota'), 0.0)
+    utm_h = safe_i(leer_estado(uid, 'utm_huso'), 19)
+    utm_hem = leer_estado(uid, 'utm_hemisferio') or 'N'
+    h_b = safe_f(leer_estado(uid, 'altura_base'), 0.0)
+    modo_hardware = leer_estado(uid, 'modo_hardware') or 'iguales'
+    nombre_base = leer_estado(uid, 'nombre_base') or 'BASE_DESCONOCIDA'
+    
+    p_mask = safe_f(leer_estado(uid, 'opt_mask'), 3.5)
+    p_cp = safe_f(leer_estado(uid, 'opt_cp'), 2.0)
+    p_ca = safe_f(leer_estado(uid, 'opt_ca'), 2.0)
+    err_hor_max = safe_f(leer_estado(uid, 'opt_eh'), 0.0)
+    err_ver_max = safe_f(leer_estado(uid, 'opt_ev'), 0.0)
+    p_max_gap = safe_f(leer_estado(uid, 'opt_max_gap'), 2.0)
+    estrategia = leer_estado(uid, 'estrategia_activa') or "MODO_D_DGPS"
 
     url_rover_nuevo = request.form.get('url_rover_nuevo')
     nombre_medido = request.form.get('nombre_medido', 'PUNTO_DESCONOCIDO')
@@ -1815,7 +1834,7 @@ def tab4_procesar():
     if not url_rover_nuevo or url_rover_nuevo.strip() == '': 
         return Response("> [ERROR] Falta el enlace de Drive del nuevo archivo RINEX Rover.\n", mimetype='text/plain')
 
-    p_r_nuevo = os.path.join(UPLOAD_FOLDER, 'rover_nuevo_raw.obs')
+    p_r_nuevo = os.path.join(ws, 'rover_nuevo_raw.obs')
 
     def procesar():
         try:
@@ -1823,9 +1842,9 @@ def tab4_procesar():
             descargar_desde_gdrive(url_rover_nuevo, p_r_nuevo)
             rf_nuevo_filename = "Drive_Nuevo_Rover.obs"
             
-            nav_path = leer_estado('nav_path')
-            sp3_path = leer_estado('sp3_path')
-            p_b_raw = leer_estado('base_raw') 
+            nav_path = leer_estado(uid, 'nav_path')
+            sp3_path = leer_estado(uid, 'sp3_path')
+            p_b_raw = leer_estado(uid, 'base_raw') 
 
             if not p_b_raw or not os.path.exists(p_b_raw): 
                 yield "> [ERROR FATAL] Falta archivo RINEX Base original.\n"; return
@@ -1909,14 +1928,14 @@ def tab4_procesar():
                 'nf': float(nf_final), 'ef': float(ef_final), 'zf': float(zf_final_ground), 
                 'ret': int(ret), 'total': len(coords), 'std_n': float(std_n), 'std_e': float(std_e), 'std_z': float(std_z),
                 'ez': float(std_z), 'fix_r': float(fix_ratio), 'pdop': float(global_pdop), 'lambda_ratio': float(global_lambda),
-                'base_file': leer_estado('name_base_raw') or "Drive_Base.obs",
+                'base_file': leer_estado(uid, 'name_base_raw') or "Drive_Base.obs",
                 'rover_file': rf_nuevo_filename,
                 'nombre_base': str(nombre_base),
                 'nombre_medido': str(nombre_medido),
                 'h_b': float(h_b),
                 'h_r_nuevo': float(h_r_nuevo),
-                'nav_file': leer_estado('name_nav_file') or "auto_nav.nav",
-                'sp3_file': leer_estado('name_sp3_file'),
+                'nav_file': leer_estado(uid, 'name_nav_file') or "auto_nav.nav",
+                'sp3_file': leer_estado(uid, 'name_sp3_file'),
                 'b_n': float(utm_n), 'b_e': float(utm_e), 'b_z': float(utm_c),
                 'r_n_calc': float(nf_final), 'r_e_calc': float(ef_final), 'r_z_calc': float(zf_final_ground),
                 'utm_h': int(utm_h), 'utm_hem': str(utm_hem),
